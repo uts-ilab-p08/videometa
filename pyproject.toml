@@ -1,6 +1,6 @@
 [project]
 name = "videometa"
-version = "0.0.2.0.1"
+version = "0.0.1"
 description = "A Python package designed to organize and manage metadata associated with video files."
 readme = "README.md"
 authors = [
