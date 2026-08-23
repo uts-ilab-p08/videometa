@@ -8,7 +8,11 @@ on:
       - closed
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: publish-pypi-develop
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -16,10 +20,48 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check out merged commit
+      - name: Check out develop
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          ref: develop
+
+      - name: Increment package version
+        env:
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("pyproject.toml")
+          content = path.read_text()
+          match = re.search(r'^version = "(\d+)\.(\d+)\.(\d+)"$', content, re.MULTILINE)
+          if not match:
+              raise SystemExit("pyproject.toml must contain a version in MAJOR.MINOR.PATCH format.")
+
+          major, minor, patch = map(int, match.groups())
+          branch = os.environ["SOURCE_BRANCH"]
+          if branch.startswith("major/"):
+              new_version = f"{major + 1}.0.0"
+          elif branch.startswith("minor/"):
+              new_version = f"{major}.{minor + 1}.0"
+          else:
+              new_version = f"{major}.{minor}.{patch + 1}"
+
+          path.write_text(
+              content[:match.start(1)] + new_version + content[match.end(1):]
+          )
+          print(f"Version updated from {match.group(1)} to {new_version} for {branch}.")
+          PY
+
+      - name: Commit version update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "chore: bump package version [skip ci]"
+          git push origin HEAD:develop
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
