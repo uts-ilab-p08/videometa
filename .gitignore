@@ -140,3 +140,6 @@ dmypy.json
 
 # MacOS
 .DS_Store
+
+# Local pipeline artifacts from the test notebooks
+tests/pipeline_output/
