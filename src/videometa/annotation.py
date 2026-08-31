@@ -12,10 +12,13 @@ from hashlib import sha256
 import logging
 from pathlib import Path
 from shutil import copyfileobj
+from statistics import mean, median
 from tempfile import gettempdir
 from typing import Any, Callable, Protocol, Sequence
 from urllib.parse import urlparse
 from urllib.request import urlopen
+
+_STATISTIC_THRESHOLDS = {"avg": "avg", "average": "avg", "mean": "avg", "median": "median"}
 
 
 logger = logging.getLogger(__name__)
@@ -23,13 +26,18 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class MotionGateConfig:
-    """Parameters controlling motion-based relevant-window selection."""
+    """Parameters controlling motion-based relevant-window selection.
+
+    `motion_threshold` may be a non-negative number or a statistic name:
+    ``"avg"`` / ``"median"`` (also ``"mean"`` / ``"average"``). Statistic
+    names are computed from the video's sampled motion scores.
+    """
 
     sample_fps: float | None = None
     gate_size: tuple[int, int] = (640, 360)
     window_seconds: float = 60.0
     stride_seconds: float = 50.0
-    motion_threshold: float = 0.002
+    motion_threshold: float | str = 0.002
     warmup_seconds: float = 2.0
     mog_history: int = 300
     mog_variance_threshold: float = 24.0
@@ -41,8 +49,25 @@ class MotionGateConfig:
             or self.stride_seconds <= 0
         ):
             raise ValueError("sample_fps, window_seconds, and stride_seconds must be positive")
-        if self.motion_threshold < 0 or self.warmup_seconds < 0:
-            raise ValueError("motion_threshold and warmup_seconds cannot be negative")
+        if self.warmup_seconds < 0:
+            raise ValueError("warmup_seconds cannot be negative")
+        if isinstance(self.motion_threshold, str):
+            if self.motion_threshold.strip().lower() not in _STATISTIC_THRESHOLDS:
+                raise ValueError("motion_threshold must be a non-negative number or 'avg'/'median'")
+        elif isinstance(self.motion_threshold, bool) or not isinstance(self.motion_threshold, (int, float)):
+            raise ValueError("motion_threshold must be a non-negative number or 'avg'/'median'")
+        elif self.motion_threshold < 0:
+            raise ValueError("motion_threshold cannot be negative")
+
+    def resolve_threshold(self, scores: Sequence[float]) -> float:
+        """Return the numeric cutoff, computing avg/median from `scores` when requested."""
+        threshold = self.motion_threshold
+        if isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
+            return float(threshold)
+        if not scores:
+            return 0.0
+        mode = _STATISTIC_THRESHOLDS[str(threshold).strip().lower()]
+        return float(mean(scores) if mode == "avg" else median(scores))
 
 
 @dataclass(frozen=True)
@@ -294,6 +319,10 @@ class RelevantWindowFinder:
         info, samples = self.sample_motion(video_path)
         return info, self.build_windows(samples, info.duration_seconds)
 
+    def resolve_motion_threshold(self, samples: Sequence[MotionSample]) -> float:
+        """Return the numeric motion cutoff for these samples."""
+        return self.config.resolve_threshold([sample.score for sample in samples])
+
     def build_windows(
         self, samples: Sequence[MotionSample], duration_seconds: float | None = None
     ) -> list[RelevantWindow]:
@@ -309,6 +338,7 @@ class RelevantWindowFinder:
             duration = samples[-1].timestamp_seconds + max(0.0, sample_interval)
         else:
             duration = duration_seconds
+        threshold = self.resolve_motion_threshold(samples)
         windows: list[RelevantWindow] = []
         start = 0.0
         while start < duration:
@@ -326,14 +356,15 @@ class RelevantWindowFinder:
                         sample_count=len(included),
                         peak_motion=round(peak, 6),
                         mean_motion=round(sum(scores) / len(scores), 6),
-                        is_relevant=peak > self.config.motion_threshold,
+                        is_relevant=peak > threshold,
                     )
                 )
             start += self.config.stride_seconds
         logger.info(
-            "Built %d motion windows (%d relevant)",
+            "Built %d motion windows (%d relevant) with threshold %.6f",
             len(windows),
             sum(window.is_relevant for window in windows),
+            threshold,
         )
         return windows
 
