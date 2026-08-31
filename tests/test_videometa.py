@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from videometa import (
     BoundingBox,
     EventExtractor,
@@ -7,8 +9,11 @@ from videometa import (
     RelevantWindow,
     RelevantWindowFinder,
     TrackedObject,
+    WindowSpatialFeatureJoiner,
     describe_spatial_position,
+    resolve_video_source,
 )
+from videometa.window_annotation import _sample_frame_features
 
 
 def test_window_builder_uses_peak_motion_and_overlap() -> None:
@@ -38,6 +43,12 @@ def test_window_builder_uses_peak_motion_and_overlap() -> None:
 def test_motion_sampling_uses_source_fps_by_default() -> None:
     assert MotionGateConfig().sample_fps is None
     assert MotionGateConfig(sample_fps=2).sample_fps == 2
+
+
+def test_resolve_video_source_accepts_local_paths() -> None:
+    video = Path(__file__).with_name("2018-03-05.13-15-00.13-20-00.bus.G340.r13.avi")
+
+    assert resolve_video_source(video) == video
 
 
 def test_calibration_does_not_mutate_finder_configuration() -> None:
@@ -80,3 +91,19 @@ def test_event_extractor_normalizes_backend_event_shape() -> None:
 
     assert events[0].name == "Vehicle enters"
     assert events[0].involved_objects[0].object_id == "7"
+
+
+def test_joiner_defaults_to_qwen_safe_video_shape() -> None:
+    joiner = WindowSpatialFeatureJoiner()
+
+    assert joiner.annotated_video_size == (640, 360)
+    assert joiner.annotated_video_fps == 2.0
+
+
+def test_qwen_frame_features_are_sampled() -> None:
+    frames = [{"frame_index": index} for index in range(150)]
+
+    sampled = _sample_frame_features(frames, max_frames=12)
+
+    assert len(sampled) == 12
+    assert sampled[0]["frame_index"] == 0

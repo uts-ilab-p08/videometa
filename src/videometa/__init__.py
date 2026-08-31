@@ -22,6 +22,13 @@ from videometa.annotation import (
     VideoEvent,
     VideoInfo,
     describe_spatial_position,
+    resolve_video_source,
+)
+from videometa.window_annotation import (
+    LVLMEventAnnotator,
+    LocalQwenEventAnnotator,
+    PreparedWindowInput,
+    WindowSpatialFeatureJoiner,
 )
 
 try:
@@ -48,5 +55,10 @@ __all__ = [
     "VideoAnnotator",
     "VideoEvent",
     "VideoInfo",
+    "LVLMEventAnnotator",
+    "LocalQwenEventAnnotator",
+    "PreparedWindowInput",
+    "WindowSpatialFeatureJoiner",
     "describe_spatial_position",
+    "resolve_video_source",
 ]

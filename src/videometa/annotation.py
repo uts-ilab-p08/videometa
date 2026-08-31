@@ -8,8 +8,17 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
+from hashlib import sha256
+import logging
 from pathlib import Path
+from shutil import copyfileobj
+from tempfile import gettempdir
 from typing import Any, Callable, Protocol, Sequence
+from urllib.parse import urlparse
+from urllib.request import urlopen
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -176,6 +185,43 @@ class EventBackend(Protocol):
         """Return events in the documented JSON-compatible shape."""
 
 
+def resolve_video_source(video_path: str | Path) -> Path:
+    """Return a local video path, downloading HTTP(S) sources into a cache.
+
+    VideoMeta delegates decoding to OpenCV and YOLO, neither of which reliably
+    accepts every remote URL. Remote files are therefore cached by URL hash and
+    reused by motion, spatial, and LVLM stages in the same or later runs.
+    """
+    source = str(video_path)
+    parsed = urlparse(source)
+    if parsed.scheme not in {"http", "https"}:
+        path = Path(source).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"Video file not found: {path}")
+        logger.info("Using local video source: %s", path)
+        return path
+
+    suffix = Path(parsed.path).suffix or ".mp4"
+    cache_dir = Path(gettempdir()) / "videometa-videos"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / f"{sha256(source.encode()).hexdigest()}{suffix}"
+    if path.is_file() and path.stat().st_size > 0:
+        logger.info("Using cached video URL: %s", path)
+        return path
+
+    temporary_path = path.with_suffix(f"{suffix}.part")
+    logger.info("Downloading video URL to cache: %s", source)
+    try:
+        with urlopen(source, timeout=60) as response, temporary_path.open("wb") as output:
+            copyfileobj(response, output)
+        temporary_path.replace(path)
+    except OSError as error:
+        temporary_path.unlink(missing_ok=True)
+        raise OSError(f"Could not download video URL: {source}") from error
+    logger.info("Downloaded video URL to: %s", path)
+    return path
+
+
 class RelevantWindowFinder:
     """Scores sampled video frames and groups motion into overlapping windows."""
 
@@ -184,18 +230,27 @@ class RelevantWindowFinder:
 
     def probe(self, video_path: str | Path) -> VideoInfo:
         cv2 = _import_cv2()
-        path = str(video_path)
+        path = str(resolve_video_source(video_path))
         capture = cv2.VideoCapture(path)
         if not capture.isOpened():
             raise OSError(f"Cannot open video: {path}")
         try:
-            return VideoInfo(
+            info = VideoInfo(
                 path=path,
                 fps=float(capture.get(cv2.CAP_PROP_FPS) or 30.0),
                 frame_count=int(capture.get(cv2.CAP_PROP_FRAME_COUNT)),
                 width=int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
                 height=int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
             )
+            logger.info(
+                "Probed video: %s (%d frames, %.2f FPS, %dx%d)",
+                info.path,
+                info.frame_count,
+                info.fps,
+                info.width,
+                info.height,
+            )
+            return info
         finally:
             capture.release()
 
@@ -203,7 +258,12 @@ class RelevantWindowFinder:
         """Make one sequential pass through a video and score sampled frames."""
         cv2 = _import_cv2()
         info = self.probe(video_path)
-        capture = cv2.VideoCapture(str(video_path))
+        logger.info(
+            "Sampling motion at %s FPS for %s",
+            self.config.sample_fps or info.fps,
+            info.path,
+        )
+        capture = cv2.VideoCapture(info.path)
         sample_fps = self.config.sample_fps or info.fps
         step = max(1, round(info.fps / sample_fps))
         warmup_frames = round(self.config.warmup_seconds * info.fps)
@@ -227,6 +287,7 @@ class RelevantWindowFinder:
                 frame_index += 1
         finally:
             capture.release()
+        logger.info("Collected %d motion samples", len(samples))
         return info, samples
 
     def find(self, video_path: str | Path) -> tuple[VideoInfo, list[RelevantWindow]]:
@@ -269,6 +330,11 @@ class RelevantWindowFinder:
                     )
                 )
             start += self.config.stride_seconds
+        logger.info(
+            "Built %d motion windows (%d relevant)",
+            len(windows),
+            sum(window.is_relevant for window in windows),
+        )
         return windows
 
     def calibrate(
@@ -298,51 +364,100 @@ class ObjectBoundaryExtractor:
     def extract(
         self, video_path: str | Path, windows: Sequence[RelevantWindow], fps: float | None = None
     ) -> list[ObjectWindowAnnotations]:
-        """Extract boundaries for relevant windows, resetting identities between windows."""
+        """Track the full video once, then assign global tracks to relevant windows."""
         cv2 = _import_cv2()
-        capture = cv2.VideoCapture(str(video_path))
+        source_path = resolve_video_source(video_path)
+        capture = cv2.VideoCapture(str(source_path))
         if not capture.isOpened():
             raise OSError(f"Cannot open video: {video_path}")
         source_fps = fps or float(capture.get(cv2.CAP_PROP_FPS) or 30.0)
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
         capture.release()
-        return [
-            self._extract_window(str(video_path), window, source_fps, width, height)
-            for window in windows
-            if window.is_relevant
-        ]
-
-    def _extract_window(
-        self, video_path: str, window: RelevantWindow, fps: float, width: int, height: int
-    ) -> ObjectWindowAnnotations:
-        cv2 = _import_cv2()
-        model = self._new_model()
-        capture = cv2.VideoCapture(video_path)
-        capture.set(cv2.CAP_PROP_POS_FRAMES, window.start_frame)
-        registry: dict[int, dict[str, Any]] = defaultdict(
-            lambda: {"label": "", "confidences": [], "first": None, "last": None, "positions": []}
+        relevant_windows = [window for window in windows if window.is_relevant]
+        logger.info(
+            "Tracking full video for spatial features in %d relevant windows: %s",
+            len(relevant_windows),
+            source_path,
         )
-        frames: list[FrameAnnotations] = []
-        frame_index = window.start_frame
+        if not relevant_windows:
+            return []
+
+        model = self._new_model()
+        capture = cv2.VideoCapture(str(source_path))
+        if not capture.isOpened():
+            raise OSError(f"Cannot open video: {video_path}")
+        registries: list[dict[int, dict[str, Any]]] = [
+            defaultdict(
+                lambda: {
+                    "label": "",
+                    "confidences": [],
+                    "first": None,
+                    "last": None,
+                    "positions": [],
+                }
+            )
+            for _ in relevant_windows
+        ]
+        frames_by_window: list[list[FrameAnnotations]] = [
+            [] for _ in relevant_windows
+        ]
+        frame_index = 0
         try:
-            while frame_index <= window.end_frame:
+            while True:
                 ok, frame = capture.read()
                 if not ok:
                     break
                 detections = self._track_frame(model, frame, width, height)
-                for detection in detections:
-                    item = registry[detection.track_id]
-                    item["label"] = detection.label
-                    item["confidences"].append(detection.confidence)
-                    item["first"] = frame_index if item["first"] is None else item["first"]
-                    item["last"] = frame_index
-                    if detection.spatial_description not in item["positions"]:
-                        item["positions"].append(detection.spatial_description)
-                frames.append(FrameAnnotations(frame_index, frame_index / fps, tuple(detections)))
+                for index, window in enumerate(relevant_windows):
+                    if window.start_frame <= frame_index <= window.end_frame:
+                        self._record_detections(
+                            registries[index], detections, frame_index
+                        )
+                        frames_by_window[index].append(
+                            FrameAnnotations(
+                                frame_index,
+                                frame_index / source_fps,
+                                tuple(detections),
+                            )
+                        )
                 frame_index += 1
         finally:
             capture.release()
+
+        annotations = [
+            self._build_window_annotations(
+                window, registry, frames, source_fps
+            )
+            for window, registry, frames in zip(
+                relevant_windows, registries, frames_by_window
+            )
+        ]
+        logger.info("Extracted spatial features for %d windows", len(annotations))
+        return annotations
+
+    @staticmethod
+    def _record_detections(
+        registry: dict[int, dict[str, Any]],
+        detections: Sequence[ObjectDetection],
+        frame_index: int,
+    ) -> None:
+        for detection in detections:
+            item = registry[detection.track_id]
+            item["label"] = detection.label
+            item["confidences"].append(detection.confidence)
+            item["first"] = frame_index if item["first"] is None else item["first"]
+            item["last"] = frame_index
+            if detection.spatial_description not in item["positions"]:
+                item["positions"].append(detection.spatial_description)
+
+    @staticmethod
+    def _build_window_annotations(
+        window: RelevantWindow,
+        registry: dict[int, dict[str, Any]],
+        frames: Sequence[FrameAnnotations],
+        fps: float,
+    ) -> ObjectWindowAnnotations:
         objects = tuple(
             TrackedObject(
                 track_id=track_id,
@@ -355,6 +470,13 @@ class ObjectBoundaryExtractor:
                 spatial_trajectory=tuple(data["positions"]),
             )
             for track_id, data in registry.items()
+        )
+        logger.info(
+            "Assigned %d global tracks to %d frames in window %.3fs–%.3fs",
+            len(objects),
+            len(frames),
+            window.start_seconds,
+            window.end_seconds,
         )
         return ObjectWindowAnnotations(window, objects, tuple(frames))
 
@@ -412,15 +534,22 @@ class EventExtractor:
     def extract(
         self, video_path: str | Path, object_annotations: Sequence[ObjectWindowAnnotations]
     ) -> list[VideoEvent]:
+        source_path = resolve_video_source(video_path)
+        logger.info("Extracting semantic events from %d windows", len(object_annotations))
         events: list[VideoEvent] = []
         for annotation in object_annotations:
-            raw_events = self.backend.analyze(
-                str(video_path),
-                annotation.window.start_seconds,
-                annotation.window.end_seconds,
-                annotation.objects,
-            )
+            analyze_window = getattr(self.backend, "analyze_window", None)
+            if callable(analyze_window):
+                raw_events = analyze_window(str(source_path), annotation)
+            else:
+                raw_events = self.backend.analyze(
+                    str(source_path),
+                    annotation.window.start_seconds,
+                    annotation.window.end_seconds,
+                    annotation.objects,
+                )
             events.extend(_parse_events(raw_events))
+        logger.info("Extracted %d semantic events", len(events))
         return events
 
 
