@@ -27,12 +27,16 @@ finder = RelevantWindowFinder(
         gate_size=(640, 360),
         window_seconds=60,
         stride_seconds=50,
-        motion_threshold=0.002,
+        motion_threshold=0.002,  # or "avg" / "median"
     )
 )
 video, windows = finder.find("camera.mp4")
 relevant_windows = [window for window in windows if window.is_relevant]
 ```
+
+`motion_threshold` accepts a fixed number or a statistic name. `"avg"` and `"median"`
+are computed from that video's sampled motion scores and used as the cutoff.
+`finder.resolve_motion_threshold(samples)` returns the numeric value actually applied.
 
 When `sample_fps` is omitted (the default), every video frame is evaluated: its value
 is automatically set to the source video FPS. Set `sample_fps=2` or another positive

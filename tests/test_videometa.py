@@ -62,6 +62,50 @@ def test_calibration_does_not_mutate_finder_configuration() -> None:
     assert finder.config.motion_threshold == 0.2
 
 
+def test_motion_threshold_avg_uses_sample_mean() -> None:
+    finder = RelevantWindowFinder(
+        MotionGateConfig(window_seconds=5, stride_seconds=5, motion_threshold="avg")
+    )
+    samples = [
+        MotionSample(0, 0.0, 0.1),
+        MotionSample(1, 1.0, 0.3),
+        MotionSample(2, 2.0, 0.2),
+    ]
+
+    threshold = finder.resolve_motion_threshold(samples)
+    windows = finder.build_windows(samples, duration_seconds=5)
+
+    assert threshold == 0.2
+    assert windows[0].is_relevant
+    assert finder.config.motion_threshold == "avg"
+
+
+def test_motion_threshold_median_uses_sample_median() -> None:
+    finder = RelevantWindowFinder(
+        MotionGateConfig(window_seconds=5, stride_seconds=5, motion_threshold="median")
+    )
+    samples = [
+        MotionSample(0, 0.0, 0.1),
+        MotionSample(1, 1.0, 0.9),
+        MotionSample(2, 2.0, 0.2),
+    ]
+
+    windows = finder.build_windows(samples, duration_seconds=5)
+
+    assert finder.resolve_motion_threshold(samples) == 0.2
+    assert windows[0].is_relevant
+
+
+def test_motion_threshold_rejects_unknown_statistic() -> None:
+    try:
+        MotionGateConfig(motion_threshold="p90")
+    except ValueError as error:
+        assert "avg" in str(error)
+        assert "median" in str(error)
+    else:
+        raise AssertionError("expected ValueError for unknown motion_threshold")
+
+
 def test_spatial_description_uses_boundary_centre() -> None:
     boundary = BoundingBox(0, 0, 100, 100)
     assert describe_spatial_position(boundary, width=300, height=300) == "top-left"
