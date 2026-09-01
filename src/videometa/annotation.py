@@ -28,6 +28,7 @@ _STATISTIC_THRESHOLDS = {
     "mean_std": "std",
 }
 _THRESHOLD_CHOICES = "'avg'/'median'/'std'"
+_STD_DIRECTIONS = {"upper", "lower", "both"}
 
 
 logger = logging.getLogger(__name__)
@@ -38,9 +39,10 @@ class MotionGateConfig:
     """Parameters controlling motion-based relevant-window selection.
 
     `motion_threshold` may be a non-negative number or a statistic name:
-    ``"avg"`` / ``"median"`` / ``"std"``. ``"std"`` uses
-    ``mean + motion_std_k * std`` (default k=1.5). Statistic names are
-    computed from the video's sampled motion scores.
+    ``"avg"`` / ``"median"`` / ``"std"``. ``"std"`` uses one or both of
+    ``mean ± motion_std_k * std`` (default k=1.5), controlled by
+    `motion_std_direction`. Statistic names are computed from the video's
+    sampled motion scores.
     """
 
     sample_fps: float | None = None
@@ -49,6 +51,7 @@ class MotionGateConfig:
     stride_seconds: float = 50.0
     motion_threshold: float | str = 0.002
     motion_std_k: float = 1.5
+    motion_std_direction: str = "upper"
     warmup_seconds: float = 2.0
     mog_history: int = 300
     mog_variance_threshold: float = 24.0
@@ -64,6 +67,8 @@ class MotionGateConfig:
             raise ValueError("warmup_seconds cannot be negative")
         if self.motion_std_k < 0:
             raise ValueError("motion_std_k cannot be negative")
+        if self.motion_std_direction.strip().lower() not in _STD_DIRECTIONS:
+            raise ValueError("motion_std_direction must be 'upper', 'lower', or 'both'")
         if isinstance(self.motion_threshold, str):
             if self.motion_threshold.strip().lower() not in _STATISTIC_THRESHOLDS:
                 raise ValueError(
@@ -77,7 +82,11 @@ class MotionGateConfig:
             raise ValueError("motion_threshold cannot be negative")
 
     def resolve_threshold(self, scores: Sequence[float]) -> float:
-        """Return the numeric cutoff, computing a statistic from `scores` when requested."""
+        """Return the upper numeric cutoff, computing a statistic when requested.
+
+        For a ``"std"`` threshold, use `resolve_std_thresholds()` to obtain
+        both bounds when `motion_std_direction` is ``"lower"`` or ``"both"``.
+        """
         threshold = self.motion_threshold
         if isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
             return float(threshold)
@@ -90,6 +99,29 @@ class MotionGateConfig:
             return float(median(scores))
         spread = stdev(scores) if len(scores) > 1 else 0.0
         return float(mean(scores) + self.motion_std_k * spread)
+
+    def resolve_std_thresholds(self, scores: Sequence[float]) -> tuple[float | None, float | None]:
+        """Return the active (lower, upper) standard-deviation bounds.
+
+        Non-``"std"`` thresholds return ``(None, resolved_threshold)`` so
+        callers can consistently use the upper bound for existing behaviour.
+        """
+        threshold = self.motion_threshold
+        if not isinstance(threshold, str) or _STATISTIC_THRESHOLDS[
+            threshold.strip().lower()
+        ] != "std":
+            return None, self.resolve_threshold(scores)
+        if not scores:
+            centre = 0.0
+            spread = 0.0
+        else:
+            centre = mean(scores)
+            spread = stdev(scores) if len(scores) > 1 else 0.0
+        lower = float(centre - self.motion_std_k * spread)
+        upper = float(centre + self.motion_std_k * spread)
+        direction = self.motion_std_direction.strip().lower()
+        return (lower if direction in {"lower", "both"} else None,
+                upper if direction in {"upper", "both"} else None)
 
 
 @dataclass(frozen=True)
@@ -345,6 +377,12 @@ class RelevantWindowFinder:
         """Return the numeric motion cutoff for these samples."""
         return self.config.resolve_threshold([sample.score for sample in samples])
 
+    def resolve_motion_thresholds(
+        self, samples: Sequence[MotionSample]
+    ) -> tuple[float | None, float | None]:
+        """Return active ``(lower, upper)`` motion-score bounds for these samples."""
+        return self.config.resolve_std_thresholds([sample.score for sample in samples])
+
     def build_windows(
         self, samples: Sequence[MotionSample], duration_seconds: float | None = None
     ) -> list[RelevantWindow]:
@@ -360,7 +398,7 @@ class RelevantWindowFinder:
             duration = samples[-1].timestamp_seconds + max(0.0, sample_interval)
         else:
             duration = duration_seconds
-        threshold = self.resolve_motion_threshold(samples)
+        lower_threshold, upper_threshold = self.resolve_motion_thresholds(samples)
         windows: list[RelevantWindow] = []
         start = 0.0
         while start < duration:
@@ -369,6 +407,10 @@ class RelevantWindowFinder:
             if included:
                 scores = [sample.score for sample in included]
                 peak = max(scores)
+                is_relevant = (
+                    (lower_threshold is not None and peak < lower_threshold)
+                    or (upper_threshold is not None and peak > upper_threshold)
+                )
                 windows.append(
                     RelevantWindow(
                         start_seconds=round(start, 3),
@@ -378,15 +420,16 @@ class RelevantWindowFinder:
                         sample_count=len(included),
                         peak_motion=round(peak, 6),
                         mean_motion=round(sum(scores) / len(scores), 6),
-                        is_relevant=peak > threshold,
+                        is_relevant=is_relevant,
                     )
                 )
             start += self.config.stride_seconds
         logger.info(
-            "Built %d motion windows (%d relevant) with threshold %.6f",
+            "Built %d motion windows (%d relevant) with bounds (%s, %s)",
             len(windows),
             sum(window.is_relevant for window in windows),
-            threshold,
+            f"{lower_threshold:.6f}" if lower_threshold is not None else "none",
+            f"{upper_threshold:.6f}" if upper_threshold is not None else "none",
         )
         return windows
 
