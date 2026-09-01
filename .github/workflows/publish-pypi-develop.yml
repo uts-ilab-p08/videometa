@@ -1,0 +1,93 @@
+name: Publish to TestPyPI from develop
+
+on:
+  pull_request:
+    branches:
+      - develop
+    types:
+      - closed
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-pypi-develop
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out develop
+        uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - name: Increment package version
+        env:
+          SOURCE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("pyproject.toml")
+          content = path.read_text()
+          match = re.search(
+              r'^(\s*version\s*=\s*")(\d+(?:\.\d+)+)(")\s*$',
+              content,
+              re.MULTILINE,
+          )
+          if not match:
+              raise SystemExit("pyproject.toml must contain a numeric version.")
+
+          version_parts = [int(part) for part in match.group(2).split(".")]
+          if len(version_parts) < 3:
+              raise SystemExit("pyproject.toml must contain a version with at least MAJOR.MINOR.PATCH.")
+
+          major, minor, patch = version_parts[:3]
+          branch = os.environ["SOURCE_BRANCH"]
+          if branch.startswith("major/"):
+              new_version = f"{major + 1}.0.0"
+          elif branch.startswith("minor/"):
+              new_version = f"{major}.{minor + 1}.0"
+          else:
+              new_version = f"{major}.{minor}.{patch + 1}"
+
+          updated_content = (
+              content[:match.start(2)] + new_version + content[match.end(2):]
+          )
+          if not re.search(
+              rf'^version\s*=\s*"{re.escape(new_version)}"\s*$',
+              updated_content,
+              re.MULTILINE,
+          ):
+              raise SystemExit("Version update failed validation.")
+
+          path.write_text(updated_content)
+          print(f"Version updated from {match.group(2)} to {new_version} for {branch}.")
+          PY
+
+      - name: Commit version update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          git commit -m "chore: bump package version [skip ci]"
+          git push origin HEAD:develop
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Build distribution
+        run: uv build
+
+      - name: Publish distribution to TestPyPI
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.TEST_PYPI_API_TOKEN }}
+          UV_PUBLISH_URL: https://test.pypi.org/legacy/
+          UV_PUBLISH_CHECK_URL: https://test.pypi.org/simple/
+        run: uv publish
