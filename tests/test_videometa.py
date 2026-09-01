@@ -96,12 +96,30 @@ def test_motion_threshold_median_uses_sample_median() -> None:
     assert windows[0].is_relevant
 
 
+def test_motion_threshold_std_uses_mean_plus_scaled_stdev() -> None:
+    finder = RelevantWindowFinder(
+        MotionGateConfig(window_seconds=5, stride_seconds=5, motion_threshold="std")
+    )
+    samples = [
+        MotionSample(0, 0.0, 0.1),
+        MotionSample(1, 1.0, 0.2),
+        MotionSample(2, 2.0, 0.3),
+    ]
+
+    threshold = finder.resolve_motion_threshold(samples)
+    windows = finder.build_windows(samples, duration_seconds=5)
+
+    assert threshold == 0.35
+    assert not windows[0].is_relevant
+
+
 def test_motion_threshold_rejects_unknown_statistic() -> None:
     try:
         MotionGateConfig(motion_threshold="p90")
     except ValueError as error:
         assert "avg" in str(error)
         assert "median" in str(error)
+        assert "std" in str(error)
     else:
         raise AssertionError("expected ValueError for unknown motion_threshold")
 

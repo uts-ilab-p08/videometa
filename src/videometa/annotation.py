@@ -12,13 +12,22 @@ from hashlib import sha256
 import logging
 from pathlib import Path
 from shutil import copyfileobj
-from statistics import mean, median
+from statistics import mean, median, stdev
 from tempfile import gettempdir
 from typing import Any, Callable, Protocol, Sequence
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-_STATISTIC_THRESHOLDS = {"avg": "avg", "average": "avg", "mean": "avg", "median": "median"}
+_STATISTIC_THRESHOLDS = {
+    "avg": "avg",
+    "average": "avg",
+    "mean": "avg",
+    "median": "median",
+    "std": "std",
+    "mean+std": "std",
+    "mean_std": "std",
+}
+_THRESHOLD_CHOICES = "'avg'/'median'/'std'"
 
 
 logger = logging.getLogger(__name__)
@@ -29,8 +38,9 @@ class MotionGateConfig:
     """Parameters controlling motion-based relevant-window selection.
 
     `motion_threshold` may be a non-negative number or a statistic name:
-    ``"avg"`` / ``"median"`` (also ``"mean"`` / ``"average"``). Statistic
-    names are computed from the video's sampled motion scores.
+    ``"avg"`` / ``"median"`` / ``"std"``. ``"std"`` uses
+    ``mean + motion_std_k * std`` (default k=1.5). Statistic names are
+    computed from the video's sampled motion scores.
     """
 
     sample_fps: float | None = None
@@ -38,6 +48,7 @@ class MotionGateConfig:
     window_seconds: float = 60.0
     stride_seconds: float = 50.0
     motion_threshold: float | str = 0.002
+    motion_std_k: float = 1.5
     warmup_seconds: float = 2.0
     mog_history: int = 300
     mog_variance_threshold: float = 24.0
@@ -51,23 +62,34 @@ class MotionGateConfig:
             raise ValueError("sample_fps, window_seconds, and stride_seconds must be positive")
         if self.warmup_seconds < 0:
             raise ValueError("warmup_seconds cannot be negative")
+        if self.motion_std_k < 0:
+            raise ValueError("motion_std_k cannot be negative")
         if isinstance(self.motion_threshold, str):
             if self.motion_threshold.strip().lower() not in _STATISTIC_THRESHOLDS:
-                raise ValueError("motion_threshold must be a non-negative number or 'avg'/'median'")
+                raise ValueError(
+                    f"motion_threshold must be a non-negative number or {_THRESHOLD_CHOICES}"
+                )
         elif isinstance(self.motion_threshold, bool) or not isinstance(self.motion_threshold, (int, float)):
-            raise ValueError("motion_threshold must be a non-negative number or 'avg'/'median'")
+            raise ValueError(
+                f"motion_threshold must be a non-negative number or {_THRESHOLD_CHOICES}"
+            )
         elif self.motion_threshold < 0:
             raise ValueError("motion_threshold cannot be negative")
 
     def resolve_threshold(self, scores: Sequence[float]) -> float:
-        """Return the numeric cutoff, computing avg/median from `scores` when requested."""
+        """Return the numeric cutoff, computing a statistic from `scores` when requested."""
         threshold = self.motion_threshold
         if isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
             return float(threshold)
         if not scores:
             return 0.0
         mode = _STATISTIC_THRESHOLDS[str(threshold).strip().lower()]
-        return float(mean(scores) if mode == "avg" else median(scores))
+        if mode == "avg":
+            return float(mean(scores))
+        if mode == "median":
+            return float(median(scores))
+        spread = stdev(scores) if len(scores) > 1 else 0.0
+        return float(mean(scores) + self.motion_std_k * spread)
 
 
 @dataclass(frozen=True)
