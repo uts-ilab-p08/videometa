@@ -126,18 +126,43 @@ class MotionGateConfig:
 
 @dataclass(frozen=True)
 class DetectionConfig:
-    """Parameters for object tracking within selected windows."""
+    """Parameters for object tracking within selected windows.
+
+    `classes` is an optional sequence of YOLO class IDs to track. When omitted
+    or empty, every class known to the loaded YOLO model is used.
+    """
 
     model_path: str = "yolo26n.pt"
     tracker: str = "bytetrack.yaml"
     confidence_threshold: float = 0.25
     spatial_grid: int = 3
+    classes: Sequence[int] | None = None
 
     def __post_init__(self) -> None:
         if not 0 <= self.confidence_threshold <= 1:
             raise ValueError("confidence_threshold must be between 0 and 1")
         if self.spatial_grid < 2:
             raise ValueError("spatial_grid must be at least 2")
+        if self.classes is None:
+            return
+        try:
+            resolved = tuple(dict.fromkeys(int(class_id) for class_id in self.classes))
+        except (TypeError, ValueError) as error:
+            raise ValueError("classes must be a sequence of non-negative integer YOLO class IDs") from error
+        if any(class_id < 0 for class_id in resolved):
+            raise ValueError("classes must be a sequence of non-negative integer YOLO class IDs")
+        object.__setattr__(self, "classes", resolved or None)
+
+    def resolve_classes(self, model: Any | None = None) -> list[int] | None:
+        """Return class IDs to pass to YOLO, or ``None`` to use every model class."""
+        if self.classes:
+            return list(self.classes)
+        names = getattr(model, "names", None)
+        if isinstance(names, dict) and names:
+            return sorted(int(class_id) for class_id in names)
+        if isinstance(names, (list, tuple)) and names:
+            return list(range(len(names)))
+        return None
 
 
 @dataclass(frozen=True)
@@ -480,6 +505,11 @@ class ObjectBoundaryExtractor:
             return []
 
         model = self._new_model()
+        classes = self.config.resolve_classes(model)
+        if classes is None:
+            logger.info("Tracking all available YOLO classes")
+        else:
+            logger.info("Tracking %d YOLO classes: %s", len(classes), classes)
         capture = cv2.VideoCapture(str(source_path))
         if not capture.isOpened():
             raise OSError(f"Cannot open video: {video_path}")
@@ -589,13 +619,16 @@ class ObjectBoundaryExtractor:
         return YOLO(self.config.model_path)
 
     def _track_frame(self, model: Any, frame: Any, width: int, height: int) -> list[ObjectDetection]:
-        result = model.track(
-            frame,
-            persist=True,
-            tracker=self.config.tracker,
-            conf=self.config.confidence_threshold,
-            verbose=False,
-        )[0]
+        track_kwargs: dict[str, Any] = {
+            "persist": True,
+            "tracker": self.config.tracker,
+            "conf": self.config.confidence_threshold,
+            "verbose": False,
+        }
+        classes = self.config.resolve_classes(model)
+        if classes is not None:
+            track_kwargs["classes"] = classes
+        result = model.track(frame, **track_kwargs)[0]
         boxes = result.boxes
         if boxes is None or boxes.id is None:
             return []

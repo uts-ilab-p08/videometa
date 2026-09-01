@@ -2,9 +2,11 @@ from pathlib import Path
 
 from videometa import (
     BoundingBox,
+    DetectionConfig,
     EventExtractor,
     MotionGateConfig,
     MotionSample,
+    ObjectBoundaryExtractor,
     ObjectWindowAnnotations,
     RelevantWindow,
     RelevantWindowFinder,
@@ -164,6 +166,57 @@ def test_motion_threshold_rejects_unknown_statistic() -> None:
         assert "std" in str(error)
     else:
         raise AssertionError("expected ValueError for unknown motion_threshold")
+
+
+def test_detection_config_defaults_to_all_yolo_classes() -> None:
+    config = DetectionConfig()
+
+    assert config.classes is None
+    assert config.resolve_classes() is None
+    assert config.resolve_classes(type("Model", (), {"names": {0: "person", 2: "car"}})()) == [0, 2]
+
+
+def test_detection_config_stores_unique_class_ids() -> None:
+    config = DetectionConfig(classes=[0, 2, 0, 5])
+
+    assert config.classes == (0, 2, 5)
+    assert config.resolve_classes() == [0, 2, 5]
+
+
+def test_detection_config_empty_classes_means_all() -> None:
+    assert DetectionConfig(classes=[]).classes is None
+
+
+def test_detection_config_rejects_invalid_class_ids() -> None:
+    try:
+        DetectionConfig(classes=[-1])
+    except ValueError as error:
+        assert "non-negative" in str(error)
+    else:
+        raise AssertionError("expected ValueError for negative YOLO class IDs")
+
+
+def test_track_frame_passes_resolved_yolo_classes() -> None:
+    class FakeResult:
+        boxes = None
+
+    class FakeModel:
+        names = {0: "person", 1: "bicycle", 2: "car"}
+
+        def track(self, frame, **kwargs):
+            captured.append(kwargs)
+            return [FakeResult()]
+
+    captured: list[dict] = []
+    extractor = ObjectBoundaryExtractor(DetectionConfig(classes=[0, 2, 5]))
+    extractor._track_frame(FakeModel(), frame=object(), width=100, height=100)
+
+    assert captured[0]["classes"] == [0, 2, 5]
+    assert captured[0]["conf"] == 0.25
+
+    captured.clear()
+    ObjectBoundaryExtractor()._track_frame(FakeModel(), frame=object(), width=100, height=100)
+    assert captured[0]["classes"] == [0, 1, 2]
 
 
 def test_spatial_description_uses_boundary_centre() -> None:
