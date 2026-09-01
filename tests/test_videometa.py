@@ -113,6 +113,48 @@ def test_motion_threshold_std_uses_mean_plus_scaled_stdev() -> None:
     assert not windows[0].is_relevant
 
 
+def test_motion_threshold_std_can_select_lower_or_both_bounds() -> None:
+    samples = [
+        MotionSample(0, 0.0, 0.1),
+        MotionSample(1, 1.0, 0.1),
+        MotionSample(2, 2.0, 0.9),
+        MotionSample(3, 3.0, 0.9),
+    ]
+    lower_finder = RelevantWindowFinder(
+        MotionGateConfig(
+            window_seconds=2,
+            stride_seconds=2,
+            motion_threshold="std",
+            motion_std_k=0.5,
+            motion_std_direction="lower",
+        )
+    )
+    both_finder = RelevantWindowFinder(
+        MotionGateConfig(
+            window_seconds=2,
+            stride_seconds=2,
+            motion_threshold="std",
+            motion_std_k=0.5,
+            motion_std_direction="both",
+        )
+    )
+
+    lower_threshold, upper_threshold = lower_finder.resolve_motion_thresholds(samples)
+    assert round(lower_threshold or 0.0, 6) == 0.26906
+    assert upper_threshold is None
+    assert [window.is_relevant for window in lower_finder.build_windows(samples, 4)] == [True, False]
+    assert [window.is_relevant for window in both_finder.build_windows(samples, 4)] == [True, True]
+
+
+def test_motion_threshold_rejects_unknown_std_direction() -> None:
+    try:
+        MotionGateConfig(motion_threshold="std", motion_std_direction="sideways")
+    except ValueError as error:
+        assert "upper" in str(error)
+    else:
+        raise AssertionError("expected ValueError for unknown motion_std_direction")
+
+
 def test_motion_threshold_rejects_unknown_statistic() -> None:
     try:
         MotionGateConfig(motion_threshold="p90")
