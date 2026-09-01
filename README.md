@@ -63,10 +63,14 @@ extractor = ObjectBoundaryExtractor(
         model_path="yolo26n.pt",
         tracker="bytetrack.yaml",
         confidence_threshold=0.25,
+        classes=[0, 1, 2, 3, 5, 7],  # omit or pass [] to track every YOLO class
     )
 )
 object_windows = extractor.extract("camera.mp4", relevant_windows, video.fps)
 ```
+
+`classes` accepts YOLO class IDs such as COCO `0` for person. When omitted or
+empty, tracking uses every class known to the loaded model.
 
 Each `ObjectDetection` has pixel coordinates, normalized coordinates via
 `detection.boundary.normalized(video.width, video.height)`, and a spatial description

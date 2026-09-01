@@ -1,15 +1,19 @@
-[tool.poetry]
+[project]
 name = "videometa"
-version = "0.0.1"
-description = "Hi"
-authors = ["Juan Vargas"]
-license = "MIT"
+version = "0.0.8"
+description = "A Python package designed to organize and manage metadata associated with video files."
 readme = "README.md"
-
-[tool.poetry.dependencies]
-python = "^3.12"
-
+authors = [
+    { name = "Juan Vargas Torres", email = "Juan.VargasTorres@student.uts.edu.au" },
+    { name = "Nelkit Chavez Calona", email = "Nelkit.ChavezCalona@student.uts.edu.au" },
+    { name = "Gourika Sood", email = "Gourika.Sood@student.uts.edu.au" },
+    { name = "Maria Jose Bustamante Grajales", email = "Maria.J.BustamanteGrajales@student.uts.edu.au" },
+    { name = "Saurabh Sabharwal", email = "Saurabh.Sabharwal@student.uts.edu.au" },
+    { name = "Abhishek Chopda", email = "Abhishek.P.Chopda@student.uts.edu.au" },
+]
+requires-python = ">=3.14"
+dependencies = []
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
