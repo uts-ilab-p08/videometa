@@ -2,7 +2,7 @@
 
 <!--next-version-placeholder-->
 
-## Unreleased
+## v0.0.10 (20/09/2026)
 
 Motion gate rework. The defaults change, and `build_windows()` now returns
 event-shaped windows instead of a fixed grid; pass
@@ -26,6 +26,19 @@ for the previous behaviour.
   windows by peak; `spatial_diversity` spreads that budget across the frame.
 - `RelevantWindow` gains `motion_metric`, `relevance`, `focus`, `active_seconds`
   and a `duration_seconds` property.
+
+Annotation descriptions read as scene descriptions rather than detector logs.
+
+- Both annotators now share one `DESCRIPTION_GUIDANCE` block: name objects by
+  appearance instead of track id, locate action against scene features rather
+  than frame edges, give direction of travel by destination or landmark, and
+  avoid inventing detail that is not visible. The frame-grid cells are still
+  supplied but are labelled as a lookup hint, not description vocabulary.
+- Track ids are stripped from `event_name`, `description` and
+  `physical_details` after the model replies; they stay in
+  `involved_objects[].id`.
+- `LVLMEventAnnotator._build_prompt()` was split out of `annotate()` so the
+  prompt can be inspected and tested without an API client.
 
 Object identity is now consistent across a whole video.
 
