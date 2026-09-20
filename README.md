@@ -182,6 +182,12 @@ the model is handed: spatial features arrive as frame-grid cells (`top-left`,
 top-left to middle-left"* — a description of the picture rather than of the
 scene. The block tells the model to
 
+- write `event_name` as a plain-English phrase in sentence case (`Person loads a
+  suitcase into a white SUV`), never dataset vocabulary like
+  `person_opens_vehicle_door`;
+- write `description` as two to four full sentences covering who is involved and
+  how they look, where it happens, what occurs step by step, and how the scene
+  is left afterwards;
 - name things by appearance (`the white SUV`, `a person in a dark jacket`), never
   by track id;
 - locate action against what is in the scene — a parking bay, the kerb, a
@@ -189,8 +195,8 @@ scene. The block tells the model to
   to repeat;
 - give direction of travel by destination or landmark, and use compass
   directions only where the scene makes them certain;
-- say what was carried, opened or handed over, and stay vague where detail is
-  not visible rather than inventing it.
+- report ordinary movement too, not just noteworthy events, while still
+  returning an empty list when genuinely nothing moves.
 
 Track ids remain available in `involved_objects[].id`. They are also stripped
 from `event_name`, `description` and `physical_details` after the model replies,

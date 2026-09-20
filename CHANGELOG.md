@@ -29,11 +29,16 @@ for the previous behaviour.
 
 Annotation descriptions read as scene descriptions rather than detector logs.
 
-- Both annotators now share one `DESCRIPTION_GUIDANCE` block: name objects by
-  appearance instead of track id, locate action against scene features rather
-  than frame edges, give direction of travel by destination or landmark, and
-  avoid inventing detail that is not visible. The frame-grid cells are still
-  supplied but are labelled as a lookup hint, not description vocabulary.
+- Both annotators now share one `DESCRIPTION_GUIDANCE` block: plain-English
+  event names in sentence case rather than dataset vocabulary, descriptions of
+  two to four sentences covering appearance, location, sequence and outcome,
+  objects named by appearance instead of track id, action located against scene
+  features rather than frame edges, and no detail invented beyond what is
+  visible. The frame-grid cells are still supplied but are labelled as a lookup
+  hint, not description vocabulary.
+- Both prompts ask for every *observable activity* rather than every *relevant
+  event*, which was setting the bar high enough that busy windows came back with
+  an empty event list.
 - Track ids are stripped from `event_name`, `description` and
   `physical_details` after the model replies; they stay in
   `involved_objects[].id`.
