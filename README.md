@@ -130,8 +130,42 @@ empty, tracking uses every class known to the loaded model.
 
 Each `ObjectDetection` has pixel coordinates, normalized coordinates via
 `detection.boundary.normalized(video.width, video.height)`, and a spatial description
-such as `"top-left"`. Object identities intentionally restart in each window, so the
-result is reliable within a window and does not claim unsupported cross-window identity.
+such as `"top-left"`.
+
+#### Identity across the video
+
+The tracker runs once over the whole video, not once per window, so an object keeps
+one `track_id` for as long as it stays visible — including across window boundaries.
+What it cannot do by itself is survive a disappearance: ByteTrack matches on position,
+so once an object has been out of shot longer than the tracker's buffer its track is
+retired, and the same person walking back in returns under a new id.
+
+`stitch_tracks` (on by default) rejoins those fragments after the pass. Two tracks
+become one identity when they are never on screen at the same moment, share a label,
+are separated by at most `stitch_max_gap_seconds`, could plausibly have travelled
+between their last and first positions at `stitch_max_speed` frame-diagonals per
+second, and their colour signatures correlate at least `stitch_min_similarity`.
+
+```python
+DetectionConfig(
+    stitch_tracks=True,
+    stitch_max_gap_seconds=30.0,   # never join things further apart than this
+    stitch_min_similarity=0.7,     # colour-histogram correlation, 0..1
+    stitch_max_speed=0.1,          # frame diagonals per second
+    appearance_samples=12,         # crops sampled per track to build its signature
+)
+```
+
+Labels are settled per identity by a confidence-weighted vote across every frame of
+the track, so an object that YOLO reads as `truck` in one frame and `car` in forty
+others is reported as `car` everywhere, rather than taking whichever class the last
+frame happened to produce.
+
+The appearance test is a colour histogram, not a learned re-identification model. It
+suits a fixed camera and distinguishable clothing; it will merge two people in similar
+dark coats, and strong lighting changes will stop it merging one person with
+themselves. Raise `stitch_min_similarity` to merge less, or set `stitch_tracks=False`
+to keep the raw tracker ids. The count of merges is logged at INFO.
 
 ### Add events with your VLM
 

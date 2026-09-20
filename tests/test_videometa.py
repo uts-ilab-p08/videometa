@@ -7,7 +7,9 @@ from videometa import (
     EventExtractor,
     MotionGateConfig,
     MotionSample,
+    FrameAnnotations,
     ObjectBoundaryExtractor,
+    ObjectDetection,
     ObjectWindowAnnotations,
     RelevantWindow,
     RelevantWindowFinder,
@@ -488,3 +490,162 @@ def test_reported_threshold_matches_the_metric_the_gate_cuts_on() -> None:
 
     assert finder.resolve_motion_threshold(samples) == 20.0
     assert finder.resolve_motion_thresholds(samples) == (None, 20.0)
+
+
+def track_profile(first, last, label="person", appearance=(1.0, 0.2, 0.05),
+                  box=BoundingBox(100, 100, 140, 200), confidence=0.9):
+    """One entry of the extractor's internal per-track profile."""
+    return {
+        "labels": {label: confidence},
+        "first": first,
+        "last": last,
+        "first_box": box,
+        "last_box": box,
+        "appearance": list(appearance),
+        "samples": 1,
+    }
+
+
+def stitch(profiles, **overrides):
+    extractor = ObjectBoundaryExtractor(DetectionConfig(**overrides))
+    return extractor._stitch_tracks(profiles, fps=30.0, diagonal=2200.0)
+
+
+def test_a_reappearing_object_keeps_its_original_identity() -> None:
+    # the same person leaves at frame 100 and returns at frame 200 as a new
+    # tracker id, because ByteTrack retires a track it cannot see
+    profiles = {
+        7: track_profile(0, 100),
+        9: track_profile(200, 300, appearance=(1.0, 0.21, 0.04)),
+    }
+
+    assert stitch(profiles) == {7: 7, 9: 7}
+
+
+def test_objects_visible_at_the_same_time_are_never_merged() -> None:
+    # identical appearance, but both on screen at once: two people, not one
+    profiles = {
+        1: track_profile(0, 300),
+        2: track_profile(100, 400),
+    }
+
+    assert stitch(profiles) == {1: 1, 2: 2}
+
+
+def test_stitching_requires_label_gap_and_distance_to_agree() -> None:
+    near = BoundingBox(100, 100, 140, 200)
+    far = BoundingBox(1800, 900, 1840, 1000)
+
+    different_label = {1: track_profile(0, 100), 2: track_profile(200, 300, label="car")}
+    assert stitch(different_label) == {1: 1, 2: 2}
+
+    long_gap = {1: track_profile(0, 100), 2: track_profile(2000, 2100)}
+    assert stitch(long_gap, stitch_max_gap_seconds=30.0) == {1: 1, 2: 2}
+
+    too_far = {1: track_profile(0, 100, box=near), 2: track_profile(103, 200, box=far)}
+    assert stitch(too_far, stitch_max_speed=0.01) == {1: 1, 2: 2}
+
+    unlike = {1: track_profile(0, 100, appearance=(1.0, 0.0, 0.0)),
+              2: track_profile(200, 300, appearance=(0.0, 0.0, 1.0))}
+    assert stitch(unlike) == {1: 1, 2: 2}
+
+
+def test_three_fragments_of_one_object_collapse_to_a_single_identity() -> None:
+    profiles = {
+        1: track_profile(0, 100),
+        2: track_profile(200, 300, appearance=(1.0, 0.19, 0.06)),
+        3: track_profile(400, 500, appearance=(1.0, 0.22, 0.05)),
+    }
+
+    assert stitch(profiles) == {1: 1, 2: 1, 3: 1}
+
+
+def test_stitching_can_be_turned_off() -> None:
+    profiles = {7: track_profile(0, 100), 9: track_profile(200, 300)}
+
+    assert stitch(profiles, stitch_tracks=False) == {7: 7, 9: 9}
+
+
+def test_label_is_a_confidence_weighted_vote_over_the_whole_identity() -> None:
+    # YOLO called it a truck once, with low confidence, and a car everywhere else
+    profiles = {
+        1: {"labels": {"car": 4.2, "truck": 0.3}, "first": 0, "last": 100,
+            "first_box": BoundingBox(0, 0, 10, 10), "last_box": BoundingBox(0, 0, 10, 10),
+            "appearance": [1.0], "samples": 1},
+        2: {"labels": {"truck": 0.9}, "first": 200, "last": 300,
+            "first_box": BoundingBox(0, 0, 10, 10), "last_box": BoundingBox(0, 0, 10, 10),
+            "appearance": [1.0], "samples": 1},
+    }
+
+    assert ObjectBoundaryExtractor._settled_label(profiles, [1]) == "car"
+    assert ObjectBoundaryExtractor._settled_label(profiles, [1, 2]) == "car"
+    assert ObjectBoundaryExtractor._settled_label(profiles, [2]) == "truck"
+
+
+def test_frames_are_rewritten_with_the_stable_id_and_settled_label() -> None:
+    def detection(track_id, label):
+        return ObjectDetection(
+            track_id=track_id, label=label, confidence=0.9,
+            boundary=BoundingBox(0, 0, 10, 10), spatial_description="top-left",
+        )
+
+    frames = [
+        FrameAnnotations(0, 0.0, (detection(7, "car"),)),
+        FrameAnnotations(210, 7.0, (detection(9, "truck"),)),
+    ]
+    identity = {7: 7, 9: 7}
+    labels = {7: "car"}
+
+    rewritten = [ObjectBoundaryExtractor._relabel_frame(f, identity, labels) for f in frames]
+
+    assert [d.track_id for f in rewritten for d in f.detections] == [7, 7]
+    assert [d.label for f in rewritten for d in f.detections] == ["car", "car"]
+
+    # and the window summary then holds one object, not two
+    registry = ObjectBoundaryExtractor._registry_for(rewritten)
+    assert list(registry) == [7]
+    assert registry[7]["first"] == 0 and registry[7]["last"] == 210
+
+
+def test_correlation_matches_opencvs_histogram_comparison() -> None:
+    from videometa.annotation import _correlation
+
+    assert _correlation([1, 2, 3, 4], [2, 4, 6, 8]) == 1.0      # scale invariant
+    assert _correlation([1, 2, 3, 4], [4, 3, 2, 1]) == -1.0
+    assert _correlation([1, 1, 1], [1, 2, 3]) == 0.0            # no spread, no signal
+    assert _correlation([1, 2], [1, 2, 3]) == 0.0               # mismatched lengths
+
+
+def test_merging_pools_label_votes_the_winner_has_not_seen() -> None:
+    # both tracks read mostly as "car", but each carries a stray class of its own
+    profiles = {
+        1: {"labels": {"car": 5.0, "truck": 0.4}, "first": 0, "last": 100,
+            "first_box": BoundingBox(0, 0, 10, 10), "last_box": BoundingBox(0, 0, 10, 10),
+            "appearance": [1.0, 0.2, 0.05], "samples": 1},
+        2: {"labels": {"car": 4.0, "bus": 0.6}, "first": 200, "last": 300,
+            "first_box": BoundingBox(0, 0, 10, 10), "last_box": BoundingBox(0, 0, 10, 10),
+            "appearance": [1.0, 0.21, 0.04], "samples": 1},
+    }
+
+    assert stitch(profiles) == {1: 1, 2: 1}
+    assert ObjectBoundaryExtractor._settled_label(profiles, [1, 2]) == "car"
+
+
+def test_travel_allowance_scales_with_the_gap_not_a_flat_second() -> None:
+    here = BoundingBox(100, 100, 140, 200)        # centre (120, 150)
+    there = BoundingBox(320, 100, 360, 200)       # centre (340, 150) — 220px away
+
+    # 220px in 0.1s is ~2200px/s across a 2200px diagonal: a different object
+    sprinting = {1: track_profile(0, 100, box=here), 2: track_profile(103, 200, box=there)}
+    assert stitch(sprinting) == {1: 1, 2: 2}
+
+    # the same 220px with 3s to cover it is an ordinary walk
+    strolling = {1: track_profile(0, 100, box=here), 2: track_profile(190, 300, box=there)}
+    assert stitch(strolling) == {1: 1, 2: 1}
+
+    # and a track that never moved rejoins across a short gap, jitter included
+    jittering = {
+        1: track_profile(0, 100, box=here),
+        2: track_profile(103, 200, box=BoundingBox(112, 100, 152, 200)),
+    }
+    assert stitch(jittering) == {1: 1, 2: 1}
