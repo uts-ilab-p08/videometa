@@ -22,29 +22,79 @@ pip install videometa opencv-python ultralytics
 ```python
 from videometa import MotionGateConfig, RelevantWindowFinder
 
-finder = RelevantWindowFinder(
-    MotionGateConfig(
-        gate_size=(640, 360),
-        window_seconds=60,
-        stride_seconds=50,
-        motion_threshold="std",
-        motion_std_k=1.5,
-        motion_std_direction="upper",  # "upper", "lower", or "both"
-    )
-)
+finder = RelevantWindowFinder(MotionGateConfig())      # sensible defaults
 video, windows = finder.find("camera.mp4")
 relevant_windows = [window for window in windows if window.is_relevant]
 ```
 
-`motion_threshold` accepts a fixed number or a statistic name. `"avg"` and `"median"`
-are computed from that video's sampled motion scores. `"std"` uses
-`mean ± motion_std_k * std` (k defaults to 1.5). Set
-`motion_std_direction="upper"` to keep unusually high-motion windows,
-`"lower"` to keep unusually still windows, or `"both"` for either extreme.
-The lower rule keeps a window only when its peak remains below the lower
-bound, preventing one quiet frame from selecting an otherwise active window.
-`finder.resolve_motion_thresholds(samples)` returns the active lower and upper
-bounds.
+The gate makes three decisions, each configurable.
+
+**1. What counts as motion — `motion_metric`.**
+
+| metric | what it measures | use it when |
+|---|---|---|
+| `"score"` | fraction of the whole frame flagged as foreground | you need the pre-0.1 behaviour |
+| `"tile_peak"` | the loudest cell of `tile_grid` | objects are small but the camera is static and clean |
+| `"blob_area"` | pixels in the largest connected region | you care about one coherent object, not scattered change |
+| `"local"` *(default)* | the loudest cell **against that cell's own history** | mixed scenes, where a distant figure and a passing lorry must both register |
+
+`"score"` averages over the whole frame, so a 20x20 object on a 640x360 gate is
+0.17% of it and sits below any threshold that also rejects noise. `"local"`
+divides each cell's activity by that cell's own spread, so motion is scored
+against what is normal *there* — which is what lets a small, distant, or
+peripheral event clear the same bar as a large central one.
+
+Every sample is measured from two fused detectors: MOG2, and frame differencing
+to cover MOG2's blind spot (it absorbs a stationary object into its background
+within roughly `mog_history`/10 samples).
+
+**2. Where the windows are cut — `segmentation`.**
+
+`"events"` (default) grows each window around a run of motion: a run opens at
+the threshold, stays open while it holds above `hysteresis_ratio` of it, and is
+then padded by `pad_seconds`, merged with neighbours closer than
+`merge_gap_seconds`, widened to `min_window_seconds` and split at
+`max_window_seconds`. Short events are widened, never dropped.
+
+`"grid"` restores the original fixed `window_seconds`/`stride_seconds` tiling,
+which is the only mode that supports `motion_std_direction` for finding
+unusually *still* windows.
+
+**3. Which windows survive — the threshold and the budget.**
+
+`motion_threshold` accepts a fixed number or a statistic name computed from that
+video's own samples (warmup samples excluded):
+
+- `"auto"` *(default)* — `median + motion_std_k * MAD`, held above a physical
+  floor for the chosen metric so a still video cannot calibrate its way down
+  into sensor noise.
+- `"mad"` — the same robust statistic with no floor.
+- `"std"` — `mean ± motion_std_k * std`. A standard deviation is inflated by the
+  few very loud samples every motion trace contains, which can push the cut
+  above every quiet event in a video that also holds one lorry; prefer `"mad"`.
+- `"avg"` / `"median"` — the plain statistic.
+
+Set `max_windows` or `max_total_seconds` to cap what the next stage has to read.
+Windows are ranked by peak, not total, so a brief intense event is not outranked
+by a long tepid one; every window is still returned, with `is_relevant` marking
+the selection. `spatial_diversity=True` spreads the budget across regions of the
+frame before spending it twice on the busiest one — useful when one area
+dominates the motion statistics, wasteful when it does not.
+
+```python
+MotionGateConfig(
+    motion_metric="local",
+    segmentation="events",
+    motion_threshold="auto",
+    pad_seconds=2.0,          # context around each event; the main cost dial
+    max_total_seconds=120,    # optional cap on what reaches the next stage
+)
+```
+
+A gate can only keep less than the events themselves occupy by dropping some. On
+a 5-minute MEVA clip whose 24 labelled events plus 2s padding occupy 38% of the
+running time, the defaults keep 53% with every event caught, against 87-100% for
+the fixed-grid gate.
 
 When `sample_fps` is omitted (the default), every video frame is evaluated: its value
 is automatically set to the source video FPS. Set `sample_fps=2` or another positive
@@ -52,6 +102,12 @@ value only when you deliberately want to sample less frequently.
 
 Use `finder.sample_motion()` once, then `finder.calibrate(samples, thresholds)` to
 compare threshold values without decoding the source video again.
+`finder.resolve_motion_thresholds(samples)` returns the active lower and upper bounds.
+
+Because `"local"` scores motion against each cell's own history, it finds what is
+*unusual for this video*. On footage that is busy from start to finish, the
+baseline rises to meet it — use `"tile_peak"` or `"score"` with an absolute
+threshold there.
 
 ### Extract spatial object boundaries
 

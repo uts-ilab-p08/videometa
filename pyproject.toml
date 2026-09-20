@@ -14,6 +14,33 @@ authors = [
 requires-python = ">=3.14"
 dependencies = []
 
+[project.optional-dependencies]
+# Video decoding, the motion gate, and YOLO object extraction.
+# Matches the `pip install videometa[vision]` hint raised by _import_cv2().
+vision = [
+    "numpy>=2.0",
+    "opencv-python>=4.10",
+    "ultralytics>=8.3",
+]
+# Hosted LVLM window annotation.
+lvlm = ["openai>=1.40"]
+# Local Qwen annotation via MLX (Apple silicon only).
+local = ["mlx-vlm>=0.1"]
+
+[dependency-groups]
+# Deliberately excludes `ultralytics` (pulls ~520 MB of torch); install it with
+#   uv pip install -e ".[vision]"
+# when you need YOLO object extraction.
+dev = [
+    "pytest>=8.0",
+    "numpy>=2.0",
+    "opencv-python>=4.10",
+    "scipy>=1.14",
+    "matplotlib>=3.9",
+    "ipykernel>=6.29",
+    "ipywidgets>=8.1",
+]
+
 [build-system]
 requires = ["uv_build>=0.12.0,<0.13.0"]
 build-backend = "uv_build"
