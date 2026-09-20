@@ -27,6 +27,23 @@ for the previous behaviour.
 - `RelevantWindow` gains `motion_metric`, `relevance`, `focus`, `active_seconds`
   and a `duration_seconds` property.
 
+Object identity is now consistent across a whole video.
+
+- `DetectionConfig.stitch_tracks` (on by default) rejoins tracker ids that belong
+  to the same object seen at different times. Candidates must never overlap in
+  time, share a label, fall within `stitch_max_gap_seconds`, be reachable at
+  `stitch_max_speed`, and match on a colour signature to
+  `stitch_min_similarity`. Set it to `False` for the raw tracker ids.
+  Defaults were chosen against real tracker output: a tenth of a frame diagonal
+  of travel per second and a 0.7 colour correlation rejoined 21 of 23 flickering
+  detections on a car-park clip while admitting one implausible jump.
+- Each identity's label is a confidence-weighted vote over every frame of the
+  track instead of whatever the last frame reported, so a class that flickers
+  between `car` and `truck` settles on one answer for the whole video.
+- Track ids and labels are rewritten consistently in both `TrackedObject` and
+  the `ObjectDetection`s inside `FrameAnnotations`, so overlays, window
+  summaries and LVLM prompts all agree.
+
 ## v0.0.9 (02/09/2026)
 
 - `DetectionConfig.classes` can restrict YOLO tracking to selected class IDs. When omitted or empty, every class known to the loaded model is used.
