@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from dataclasses import dataclass
 import logging
 from pathlib import Path
@@ -13,6 +14,54 @@ from videometa.annotation import ObjectWindowAnnotations, resolve_video_source
 
 
 logger = logging.getLogger(__name__)
+
+
+#: Shared description rules for every annotator prompt.
+#:
+#: The detector's own vocabulary is the problem this text exists to solve.
+#: Spatial features reach the model as grid cells -- "top-left",
+#: "middle-center" -- and a model handed that vocabulary writes "car #201 moves
+#: from top-left to middle-left", which describes the picture rather than the
+#: scene. These rules push the wording back towards what someone watching the
+#: footage would actually say.
+DESCRIPTION_GUIDANCE = (
+    "You are a professional video annotator producing surveillance event "
+    "records. Write each description as objective observational prose that an "
+    "analyst can understand without access to the footage.\n"
+    "- Identify each subject by observable appearance: 'the white SUV', 'a "
+    "person in a dark jacket carrying a suitcase'. Never write a track id, a "
+    "'#' or the word 'track' in event_name or description. Identifiers belong "
+    "only in involved_objects[].id.\n"
+    "- Locate the action against features visible in the scene: the road, the "
+    "kerb, a parking bay, a doorway, the building entrance, the grass verge, "
+    "an adjacent vehicle. The grid cells in the features below ('top-left', "
+    "'middle-center') are frame coordinates provided to help you locate the "
+    "subject. Do not reproduce them in the written record.\n"
+    "- State direction of travel by destination or landmark: 'reverses out of "
+    "a parking bay and departs along the access road', never 'moves from top "
+    "to bottom'. Use a compass bearing only where the scene establishes it "
+    "with certainty; otherwise state what the subject is heading towards.\n"
+    "- Record what defines the event: what was carried, opened, transferred or "
+    "left behind, which subjects interacted, and how the scene differs before "
+    "and after.\n"
+    "- Report only what is visible. Where a colour or type cannot be "
+    "determined, remain general ('a dark hatchback') rather than speculate.\n"
+    "Acceptable: 'A white SUV reverses out of a parking bay near the building "
+    "entrance and departs along the access road while a person in a dark "
+    "jacket walks along the kerb carrying a suitcase.'\n"
+    "Not acceptable: 'car #201 moves from top-left to middle-left.'"
+)
+
+#: Legend for the compact spatial features, framed so the grid vocabulary reads
+#: as a lookup hint rather than as description material.
+FEATURE_LEGEND = (
+    "Tracked objects (id, l = label, c = mean confidence, p = frame-grid cells "
+    "visited, for locating the object in the picture):"
+)
+FRAME_LEGEND = (
+    "Sampled frames (t = seconds, d = detections as id / l = label / "
+    "p = frame-grid cell):"
+)
 
 
 # Prefill KV cache for Qwen3-VL-4B costs roughly 145 KB per token (36 layers,
@@ -216,21 +265,28 @@ class LVLMEventAnnotator:
         self.model = model
         self.feature_frames = feature_frames
 
-    def annotate(self, prepared_input: PreparedWindowInput) -> list[dict[str, Any]]:
-        """Send a prepared window's images and spatial context to the LVLM."""
-        prompt = (
+    def _build_prompt(self, prepared_input: PreparedWindowInput) -> str:
+        return (
             f"These ordered images cover video time {prepared_input.start_seconds:.2f}s "
             f"to {prepared_input.end_seconds:.2f}s. The overlays show detector "
             "boundaries labelled as `class #track_id`. "
             "Use the images and the spatial features to identify visible events. "
-            "Detector labels are supporting evidence, not certain visual facts. "
+            "Detector labels are supporting evidence, not certain visual facts.\n\n"
+            f"{DESCRIPTION_GUIDANCE}\n\n"
+            "For each involved object, physical_details records its observable "
+            "characteristics and its part in the event: colour, type, clothing, "
+            "and anything it is carrying.\n\n"
             'Return JSON only: {"events": [{"event_name": str, "description": str, '
             '"involved_objects": [{"id": str, "label": str, "physical_details": str}]}]}.\n\n'
-            "Tracked-object features:\n"
+            f"{FEATURE_LEGEND}\n"
             f"{_compact_json(_compact_object_features(prepared_input.object_features))}\n\n"
-            "Sampled per-frame features:\n"
+            f"{FRAME_LEGEND}\n"
             f"{_compact_json(_sample_frame_features(prepared_input.frame_features, self.feature_frames))}"
         )
+
+    def annotate(self, prepared_input: PreparedWindowInput) -> list[dict[str, Any]]:
+        """Send a prepared window's images and spatial context to the LVLM."""
+        prompt = self._build_prompt(prepared_input)
         content = list(prepared_input.image_messages)
         content.append({"type": "text", "text": prompt})
         response = self.client.chat.completions.create(
@@ -242,7 +298,7 @@ class LVLMEventAnnotator:
         parsed = json.loads(_strip_json_fence(response.choices[0].message.content))
         if not isinstance(parsed, dict) or not isinstance(parsed.get("events"), list):
             raise ValueError("LVLM response must be a JSON object containing an events list.")
-        return parsed["events"]
+        return _clean_events(parsed["events"])
 
 
 class LocalQwenEventAnnotator:
@@ -349,19 +405,22 @@ class LocalQwenEventAnnotator:
             "Analyze this one annotated video window independently. Identify every "
             "relevant event that occurs within this window only. Ignore static "
             "background objects and do not infer events outside the displayed time. "
-            "For each event, provide a concise event name and description, then list "
-            "only the objects involved. Each involved object must include its "
-            "detector track ID when available, object label, and a short description "
-            "of visible physical details or its role in the event. The overlays show "
-            "detector boundaries labelled as `class #track_id`. "
-            "Use the video and the spatial features as supporting evidence; do not "
-            "treat detector labels as certain visual facts. "
+            "For each event, give a concise event name and description, then list "
+            "only the objects involved. The overlays show detector boundaries "
+            "labelled as `class #track_id`. Use the video and the spatial features "
+            "as supporting evidence; do not treat detector labels as certain "
+            "visual facts.\n\n"
+            f"{DESCRIPTION_GUIDANCE}\n\n"
+            "Each involved object carries its detector track id in the id field, its "
+            "label, and physical_details recording its observable characteristics "
+            "and its part in the event: colour, type, clothing, and anything it is "
+            "carrying.\n\n"
             'Return JSON only as a list of events: [{"event_name": str, '
             '"description": str, "involved_objects": [{"id": str, "label": str, '
             '"physical_details": str}]}].\n\n'
-            "Tracked-object features (id, label, mean confidence, positions visited):\n"
+            f"{FEATURE_LEGEND}\n"
             f"{_compact_json(_compact_object_features(prepared_input.object_features))}\n\n"
-            "Sampled per-frame features (t = seconds, d = detections as id/label/position):\n"
+            f"{FRAME_LEGEND}\n"
             f"{_compact_json(_sample_frame_features(prepared_input.frame_features, frame_count))}"
         )
 
@@ -413,7 +472,7 @@ class LocalQwenEventAnnotator:
         if not isinstance(parsed, list):
             raise ValueError("Local Qwen response must be a JSON event list.")
         logger.info("Local Qwen returned %d events for %s", len(parsed), video_path)
-        return parsed
+        return _clean_events(parsed)
 
 
 def _compact_json(value: Any) -> str:
@@ -675,6 +734,55 @@ def _draw_detections(
             }
         )
     return annotated, features
+
+
+#: Ways a model writes a detector id into prose despite being told not to.
+_TRACK_ID_PATTERNS = (
+    re.compile(r"\s*\(\s*(?:track\s*)?(?:id\s*)?#?\s*\d+\s*\)", re.IGNORECASE),
+    re.compile(r"\s*\btrack(?:\s*id)?\s*#?\s*\d+", re.IGNORECASE),
+    re.compile(r"\s*#\s*\d+"),
+)
+
+
+def _strip_track_ids(text: str) -> str:
+    """Remove detector ids from prose the prompt asked to keep them out of.
+
+    The instruction is the real fix; this is the guarantee. A model that slips
+    "the white SUV (track 201)" into a description would otherwise put an
+    identifier in front of a reader that means nothing to them and changes
+    between runs. The id stays available in ``involved_objects[].id``.
+    """
+    cleaned = text
+    for pattern in _TRACK_ID_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    return re.sub(r"\s+([,.;:])", r"\1", cleaned).strip()
+
+
+def _clean_events(events: Sequence[Any]) -> list[Any]:
+    """Enforce the description rules on whatever the model actually returned."""
+    cleaned: list[Any] = []
+    for event in events:
+        if not isinstance(event, dict):
+            cleaned.append(event)
+            continue
+        item = dict(event)
+        for key in ("event_name", "description"):
+            if isinstance(item.get(key), str):
+                item[key] = _strip_track_ids(item[key])
+        objects = item.get("involved_objects")
+        if isinstance(objects, list):
+            item["involved_objects"] = [
+                {
+                    **entry,
+                    "physical_details": _strip_track_ids(entry["physical_details"]),
+                }
+                if isinstance(entry, dict) and isinstance(entry.get("physical_details"), str)
+                else entry
+                for entry in objects
+            ]
+        cleaned.append(item)
+    return cleaned
 
 
 def _strip_json_fence(content: str) -> str:

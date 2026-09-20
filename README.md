@@ -173,6 +173,33 @@ Provide a small adapter around the VLM or API of your choice. It receives the so
 video, window time range, and tracked-object context; it returns JSON-compatible event
 records.
 
+#### How descriptions are worded
+
+`LVLMEventAnnotator` and `LocalQwenEventAnnotator` share one instruction block,
+`DESCRIPTION_GUIDANCE`, which decides how events read. It exists because of what
+the model is handed: spatial features arrive as frame-grid cells (`top-left`,
+`middle-center`), and a model given that vocabulary writes *"car #201 moves from
+top-left to middle-left"* — a description of the picture rather than of the
+scene. The block tells the model to
+
+- name things by appearance (`the white SUV`, `a person in a dark jacket`), never
+  by track id;
+- locate action against what is in the scene — a parking bay, the kerb, a
+  doorway — and treat the grid cells as a hint for where to look, not as words
+  to repeat;
+- give direction of travel by destination or landmark, and use compass
+  directions only where the scene makes them certain;
+- say what was carried, opened or handed over, and stay vague where detail is
+  not visible rather than inventing it.
+
+Track ids remain available in `involved_objects[].id`. They are also stripped
+from `event_name`, `description` and `physical_details` after the model replies,
+so an id cannot reach a reader even if the model ignores the instruction — ids
+come from the tracker and change between runs, which makes them meaningless in
+prose.
+
+To change the house style, edit `DESCRIPTION_GUIDANCE`; both annotators follow it.
+
 ```python
 from videometa import EventExtractor, VideoAnnotator
 

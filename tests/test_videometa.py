@@ -14,6 +14,7 @@ from videometa import (
     RelevantWindow,
     RelevantWindowFinder,
     TrackedObject,
+    PreparedWindowInput,
     WindowSpatialFeatureJoiner,
     describe_spatial_position,
     resolve_video_source,
@@ -649,3 +650,83 @@ def test_travel_allowance_scales_with_the_gap_not_a_flat_second() -> None:
         2: track_profile(103, 200, box=BoundingBox(112, 100, 152, 200)),
     }
     assert stitch(jittering) == {1: 1, 2: 1}
+
+
+def prepared_window() -> PreparedWindowInput:
+    return PreparedWindowInput(
+        start_seconds=30.0,
+        end_seconds=42.0,
+        object_features=(
+            {"track_id": 201, "label": "car", "average_confidence": 0.8,
+             "spatial_trajectory": ("top-left", "middle-left")},
+        ),
+        frame_features=(
+            {"timestamp_seconds": 30.0,
+             "detections": [{"track_id": 201, "label": "car",
+                             "spatial_position": "top-left"}]},
+        ),
+        image_messages=(),
+        artifact_directory=None,
+        annotated_video_path="clip.mp4",
+    )
+
+
+def test_both_prompts_carry_the_same_description_rules() -> None:
+    from types import SimpleNamespace
+
+    from videometa.window_annotation import (
+        DESCRIPTION_GUIDANCE,
+        LVLMEventAnnotator,
+        LocalQwenEventAnnotator,
+    )
+
+    window = prepared_window()
+    hosted = LVLMEventAnnotator._build_prompt(SimpleNamespace(feature_frames=4), window)
+    local = LocalQwenEventAnnotator._build_window_prompt(None, window, 4)
+
+    for prompt in (hosted, local):
+        assert DESCRIPTION_GUIDANCE in prompt
+        # the rules that answer the complaint about frame-relative wording
+        assert "Never write a track id" in prompt
+        assert "frame coordinates provided to help you locate the subject" in prompt
+        assert "never 'moves from top to bottom'" in prompt
+        # the grid vocabulary is still supplied, but framed as a lookup hint
+        assert "frame-grid cells" in prompt
+        assert "top-left" in prompt
+
+
+def test_track_ids_are_stripped_from_prose_but_kept_as_fields() -> None:
+    from videometa.window_annotation import _clean_events, _strip_track_ids
+
+    assert _strip_track_ids("car #201 moves to the left") == "car moves to the left"
+    assert _strip_track_ids("The white SUV (track 201) reverses.") == "The white SUV reverses."
+    assert _strip_track_ids("Vehicle track id 42 stops") == "Vehicle stops"
+    # wording that is not an id survives untouched
+    assert _strip_track_ids("the red car drives east") == "the red car drives east"
+
+    cleaned = _clean_events([
+        {
+            "event_name": "car #201 departs",
+            "description": "car #201 pulls away along the access road",
+            "involved_objects": [
+                {"id": "201", "label": "car", "physical_details": "white SUV #201"}
+            ],
+        }
+    ])
+
+    assert cleaned[0]["event_name"] == "car departs"
+    assert cleaned[0]["description"] == "car pulls away along the access road"
+    assert cleaned[0]["involved_objects"][0]["physical_details"] == "white SUV"
+    assert cleaned[0]["involved_objects"][0]["id"] == "201"     # the id itself is untouched
+
+
+def test_cleaning_events_tolerates_odd_model_output() -> None:
+    from videometa.window_annotation import _clean_events
+
+    assert _clean_events([]) == []
+    assert _clean_events(["not a dict"]) == ["not a dict"]
+    assert _clean_events([{"description": None}]) == [{"description": None}]
+    assert _clean_events([{"involved_objects": "nope"}]) == [{"involved_objects": "nope"}]
+    assert _clean_events([{"involved_objects": [{"id": "1"}]}]) == [
+        {"involved_objects": [{"id": "1"}]}
+    ]
