@@ -730,3 +730,33 @@ def test_cleaning_events_tolerates_odd_model_output() -> None:
     assert _clean_events([{"involved_objects": [{"id": "1"}]}]) == [
         {"involved_objects": [{"id": "1"}]}
     ]
+
+
+def test_prompt_asks_for_natural_names_and_detailed_descriptions() -> None:
+    from videometa.window_annotation import DESCRIPTION_GUIDANCE
+
+    # event_name: plain English, not dataset vocabulary
+    assert "snake_case" in DESCRIPTION_GUIDANCE
+    assert "person_opens_vehicle_door" in DESCRIPTION_GUIDANCE     # named as a bad example
+    assert "sentence case" in DESCRIPTION_GUIDANCE
+    # description: detail, with a stated length
+    assert "two to four complete sentences" in DESCRIPTION_GUIDANCE
+    assert "how the scene is left afterwards" in DESCRIPTION_GUIDANCE
+    # ordinary movement counts, so a busy window does not come back empty...
+    assert "including ordinary movement" in DESCRIPTION_GUIDANCE
+    # ...but an empty window is still allowed to return nothing
+    assert "return an empty list rather than" in DESCRIPTION_GUIDANCE
+
+
+def test_prompts_no_longer_gate_on_the_word_relevant() -> None:
+    from types import SimpleNamespace
+
+    from videometa.window_annotation import LVLMEventAnnotator, LocalQwenEventAnnotator
+
+    window = prepared_window()
+    hosted = LVLMEventAnnotator._build_prompt(SimpleNamespace(feature_frames=4), window)
+    local = LocalQwenEventAnnotator._build_window_prompt(None, window, 4)
+
+    for prompt in (hosted, local):
+        assert "observable activity" in prompt
+        assert "relevant event" not in prompt
