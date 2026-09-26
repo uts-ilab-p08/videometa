@@ -691,6 +691,13 @@ def _overlay_style(frame: Any) -> tuple[float, int, int]:
     return font_scale, text_thickness, box_thickness
 
 
+def _overlap_area(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> int:
+    """Pixel area shared by two (x0, y0, x1, y1) rectangles."""
+    width = min(first[2], second[2]) - max(first[0], second[0])
+    height = min(first[3], second[3]) - max(first[1], second[1])
+    return max(0, width) * max(0, height)
+
+
 def _draw_detections(
     frame: Any,
     detections: Sequence[Any],
@@ -707,41 +714,67 @@ def _draw_detections(
     text_color = (0, 0, 0)
     pad = 2
     features: list[dict[str, Any]] = []
+    placed: list[tuple[int, int, int, int]] = []
+    labels: list[tuple[str, tuple[int, int, int, int], int, int]] = []
+    boxes: list[tuple[Any, tuple[int, int, int, int]]] = []
     for detection in detections:
-        left, top, right, bottom = (
+        box = (
             round(detection.boundary.left * scale_x),
             round(detection.boundary.top * scale_y),
             round(detection.boundary.right * scale_x),
             round(detection.boundary.bottom * scale_y),
         )
-        cv2.rectangle(annotated, (left, top), (right, bottom), border_color, box_thickness)
+        boxes.append((detection, box))
+        cv2.rectangle(annotated, box[:2], box[2:], border_color, box_thickness)
+    # Labels are placed after every box is drawn, and smallest boxes first: a
+    # small or distant object has the fewest spots to put its label, so it
+    # chooses before a large neighbour that can be read from almost anywhere.
+    for detection, (left, top, right, bottom) in sorted(
+        boxes, key=lambda item: (item[1][2] - item[1][0]) * (item[1][3] - item[1][1])
+    ):
         label = f"{detection.label} #{detection.track_id}"
         (label_width, label_height), baseline = cv2.getTextSize(
             label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_thickness
         )
-        text_left = max(pad, min(left, frame_width - label_width - pad))
-        label_top = top - label_height - baseline - (2 * pad)
-        if label_top < 0:
-            text_baseline = min(frame_height - pad, top + label_height + pad)
-        else:
-            text_baseline = top - pad
-        cv2.rectangle(
-            annotated,
-            (text_left - pad, text_baseline - label_height - pad),
-            (text_left + label_width + pad, text_baseline + baseline + pad),
-            border_color,
-            thickness=-1,
-        )
+        full_width, full_height = label_width + 2 * pad, label_height + baseline + 2 * pad
+        # Candidate top-left corners for the label plate, in order of preference:
+        # above, below, inside-top, then beside the box on either side.
+        candidates = [
+            (left, top - full_height),
+            (left, bottom),
+            (left, top),
+            (right, top),
+            (left - full_width, top),
+            (right - full_width, top - full_height),
+            (right - full_width, bottom),
+            (left, bottom - full_height),
+        ]
+        best, best_overlap = None, None
+        for x, y in candidates:
+            x = max(0, min(x, frame_width - full_width))
+            y = max(0, min(y, frame_height - full_height))
+            plate = (x, y, x + full_width, y + full_height)
+            overlap = sum(_overlap_area(plate, other) for other in placed)
+            if best_overlap is None or overlap < best_overlap:
+                best, best_overlap = plate, overlap
+            if overlap == 0:
+                break
+        plate = best
+        placed.append(plate)
+        labels.append((label, plate, label_height, pad))
+    for label, (x0, y0, x1, y1), label_height, pad in labels:
+        cv2.rectangle(annotated, (x0, y0), (x1, y1), border_color, thickness=-1)
         cv2.putText(
             annotated,
             label,
-            (text_left, text_baseline),
+            (x0 + pad, y0 + pad + label_height),
             cv2.FONT_HERSHEY_SIMPLEX,
             font_scale,
             text_color,
             text_thickness,
             lineType=cv2.LINE_AA,
         )
+    for detection in detections:
         features.append(
             {
                 "track_id": detection.track_id,
