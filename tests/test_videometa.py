@@ -740,8 +740,8 @@ def test_prompt_asks_for_natural_names_and_detailed_descriptions() -> None:
     assert "person_opens_vehicle_door" in DESCRIPTION_GUIDANCE     # named as a bad example
     assert "sentence case" in DESCRIPTION_GUIDANCE
     # description: detail, with a stated length
-    assert "two to four complete sentences" in DESCRIPTION_GUIDANCE
-    assert "how the scene is left afterwards" in DESCRIPTION_GUIDANCE
+    assert "four to seven complete sentences" in DESCRIPTION_GUIDANCE
+    assert "The end state" in DESCRIPTION_GUIDANCE
     # ordinary movement counts, so a busy window does not come back empty...
     assert "including ordinary movement" in DESCRIPTION_GUIDANCE
     # ...but an empty window is still allowed to return nothing
