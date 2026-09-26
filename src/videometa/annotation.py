@@ -57,6 +57,29 @@ _BOX_JITTER = 0.02
 
 
 logger = logging.getLogger(__name__)
+_PACKAGE_LOGGER = "videometa"
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def set_verbose(enabled: bool = True) -> None:
+    """Show (or hide) videometa's execution details on stderr.
+
+    Verbose output covers each stage: the video probed, the device YOLO runs on,
+    motion thresholds, windows built and selected, tracks stitched, and events
+    extracted. Applications that configure `logging` themselves need not call
+    this; the package only logs through the ``videometa`` logger.
+    """
+    package_logger = logging.getLogger(_PACKAGE_LOGGER)
+    for handler in [h for h in package_logger.handlers if getattr(h, "_videometa_verbose", False)]:
+        package_logger.removeHandler(handler)
+    if not enabled:
+        package_logger.setLevel(logging.WARNING)
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+    handler._videometa_verbose = True  # type: ignore[attr-defined]
+    package_logger.addHandler(handler)
+    package_logger.setLevel(logging.INFO)
 
 
 def _sample_interval(samples: Sequence[MotionSample]) -> float:
@@ -419,6 +442,10 @@ class DetectionConfig:
     `classes` is an optional sequence of YOLO class IDs to track. When omitted
     or empty, every class known to the loaded YOLO model is used.
 
+    `device` is the torch device YOLO runs on (``"cuda"``, ``"mps"``, ``"cpu"``,
+    ``"cuda:1"``...). When omitted it is auto-detected: CUDA if available, then
+    Apple MPS, then CPU.
+
     **Identity across the video.** The tracker runs once over the whole video,
     so an object keeps its id while it is continuously visible. It cannot keep
     it across a disappearance: ByteTrack matches on position, and once a track
@@ -451,6 +478,7 @@ class DetectionConfig:
     confidence_threshold: float = 0.25
     spatial_grid: int = 3
     classes: Sequence[int] | None = None
+    device: str | None = None
 
     # --- identity consistency across the whole video
     stitch_tracks: bool = True
@@ -1159,6 +1187,7 @@ class ObjectBoundaryExtractor:
     ) -> None:
         self.config = config or DetectionConfig()
         self._model_factory = model_factory
+        self._device: str | None = None
 
     def extract(
         self, video_path: str | Path, windows: Sequence[RelevantWindow], fps: float | None = None
@@ -1183,6 +1212,8 @@ class ObjectBoundaryExtractor:
             return []
 
         model = self._new_model()
+        self._device = resolve_device(self.config.device)
+        logger.info("Running YOLO model %s on device: %s", self.config.model_path, self._device)
         classes = self.config.resolve_classes(model)
         if classes is None:
             logger.info("Tracking all available YOLO classes")
@@ -1452,6 +1483,8 @@ class ObjectBoundaryExtractor:
             "conf": self.config.confidence_threshold,
             "verbose": False,
         }
+        if self._device is not None:
+            track_kwargs["device"] = self._device
         classes = self.config.resolve_classes(model)
         if classes is not None:
             track_kwargs["classes"] = classes
@@ -1517,7 +1550,10 @@ class VideoAnnotator:
         window_finder: RelevantWindowFinder | None = None,
         boundary_extractor: ObjectBoundaryExtractor | None = None,
         event_extractor: EventExtractor | None = None,
+        verbose: bool = False,
     ) -> None:
+        if verbose:
+            set_verbose(True)
         self.window_finder = window_finder or RelevantWindowFinder()
         self.boundary_extractor = boundary_extractor or ObjectBoundaryExtractor()
         self.event_extractor = event_extractor
@@ -1567,6 +1603,27 @@ def _parse_events(raw_events: Sequence[dict[str, Any]]) -> list[VideoEvent]:
             )
         )
     return parsed
+
+
+def resolve_device(requested: str | None = None) -> str:
+    """Return the torch device to run YOLO on: `requested`, else CUDA, MPS, then CPU."""
+    if requested:
+        logger.info("Device: %s (requested)", requested)
+        return requested
+    try:
+        import torch  # type: ignore[import-not-found]
+    except ImportError:
+        logger.info("Device: cpu (torch not installed)")
+        return "cpu"
+    if torch.cuda.is_available():
+        logger.info("Device: cuda (auto-detected: %s)", torch.cuda.get_device_name(0))
+        return "cuda"
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available():
+        logger.info("Device: mps (auto-detected: Apple Silicon GPU)")
+        return "mps"
+    logger.info("Device: cpu (no CUDA or MPS available)")
+    return "cpu"
 
 
 def _import_numpy() -> Any:
