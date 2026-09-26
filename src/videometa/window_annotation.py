@@ -35,11 +35,31 @@ DESCRIPTION_GUIDANCE = (
     "Never use snake_case, ALL_CAPS, dataset class names or detector "
     "vocabulary such as 'person_opens_vehicle_door' or 'OBJECT_TRANSFER'.\n"
     "\n"
-    "description: two to four complete sentences with real detail. Cover who "
-    "or what is involved and how they look, where in the scene it happens, "
-    "what occurs step by step, and how the scene is left afterwards. Name "
-    "subjects by observable appearance: 'the white SUV', 'a person in a dark "
-    "jacket carrying a suitcase'.\n"
+    "description: four to seven complete sentences, richly detailed, written "
+    "as a chronological account. Cover, in this order where it applies:\n"
+    "  1. The setting and starting state: where each subject is and what it "
+    "is doing when the window opens.\n"
+    "  2. Each subject's appearance: colour (with shade, such as 'dark navy' "
+    "or 'pale grey'), size relative to its surroundings ('a small child', "
+    "'a full-size van'), shape or build, clothing, and anything carried, "
+    "worn or towed.\n"
+    "  3. Movement, step by step: the path taken, direction of travel by "
+    "landmark, pace (standing, strolling, hurrying, creeping, accelerating, "
+    "braking), changes of pace or direction, stops and starts, and how far "
+    "the subject travels relative to the scene.\n"
+    "  4. Interactions: who or what each subject approaches, follows, avoids, "
+    "hands something to, opens, enters, exits, loads, waits for or passes, "
+    "including relative position while doing so ('beside', 'behind', 'in "
+    "front of', 'alongside') and the order in which things happen.\n"
+    "  5. Timing cues from the clip where they can be judged: brief, "
+    "sustained, or repeated actions, and roughly how far into the window a "
+    "step happens ('at the start', 'midway', 'towards the end').\n"
+    "  6. The end state: where every subject is and what has changed in the "
+    "scene afterwards.\n"
+    "Name subjects by observable appearance: 'the white SUV', 'a person in a "
+    "dark jacket carrying a suitcase'. When several similar subjects appear, "
+    "tell them apart consistently by appearance or position for the whole "
+    "description.\n"
     "\n"
     "Rules for both fields:\n"
     "- Never write a track id, a '#' or the word 'track'. Identifiers belong "
@@ -64,14 +84,30 @@ DESCRIPTION_GUIDANCE = (
     "\n"
     "Acceptable:\n"
     "  event_name: 'Person loads a suitcase into a white SUV'\n"
-    "  description: 'A white SUV is parked in a bay near the building "
-    "entrance with its tailgate raised. A person in a dark jacket walks over "
-    "from the kerb carrying a large suitcase, lifts it into the open boot and "
-    "closes the tailgate. They then walk round to the driver's side, and the "
-    "vehicle stays where it is with the boot now shut.'\n"
+    "  description: 'A white full-size SUV is parked nose-in to a bay beside "
+    "the building entrance with its tailgate raised. A tall person in a dark "
+    "navy jacket and light trousers walks steadily along the kerb from the "
+    "left, carrying a large black hard-shell suitcase in their right hand. "
+    "They stop at the rear of the SUV, lift the suitcase with both hands into "
+    "the open boot and push it in, then lower the tailgate and press it shut. "
+    "Midway through, a small silver hatchback passes behind them along the "
+    "access road without stopping. The person then walks round the SUV's "
+    "passenger side towards the driver's door, and the SUV stays parked with "
+    "the boot now closed.'\n"
     "Not acceptable:\n"
     "  event_name: 'person_unloads_vehicle'\n"
     "  description: 'car #201 moves from top-left to middle-left.'"
+)
+
+#: What `physical_details` should hold for each involved object.
+PHYSICAL_DETAILS_GUIDANCE = (
+    "For each involved object, physical_details is a full sentence or two "
+    "covering: colour (with shade) and any secondary colours or markings; "
+    "type, make or garment style; approximate size relative to the scene and "
+    "to the other objects; shape or build; anything it carries, wears, tows "
+    "or opens; where it starts and ends in the scene; how it moves (path, "
+    "pace, changes of speed or direction, stops); and exactly how it "
+    "interacts with the other involved objects."
 )
 
 #: Legend for the compact spatial features, framed so the grid vocabulary reads
@@ -296,9 +332,7 @@ class LVLMEventAnnotator:
             "activity. "
             "Detector labels are supporting evidence, not certain visual facts.\n\n"
             f"{DESCRIPTION_GUIDANCE}\n\n"
-            "For each involved object, physical_details records its observable "
-            "characteristics and its part in the event: colour, type, clothing, "
-            "and anything it is carrying.\n\n"
+            f"{PHYSICAL_DETAILS_GUIDANCE}\n\n"
             'Return JSON only: {"events": [{"event_name": str, "description": str, '
             '"involved_objects": [{"id": str, "label": str, "physical_details": str}]}]}.\n\n'
             f"{FEATURE_LEGEND}\n"
@@ -316,7 +350,7 @@ class LVLMEventAnnotator:
             model=self.model,
             messages=[{"role": "user", "content": content}],
             temperature=0,
-            max_tokens=800,
+            max_tokens=1600,
         )
         parsed = json.loads(_strip_json_fence(response.choices[0].message.content))
         if not isinstance(parsed, dict) or not isinstance(parsed.get("events"), list):
@@ -332,7 +366,7 @@ class LocalQwenEventAnnotator:
         model_id: str = "mlx-community/Qwen3-VL-4B-Instruct-4bit",
         *,
         video_fps: float = 2.0,
-        max_tokens: int = 600,
+        max_tokens: int = 1200,
         prompt_token_budget: int = DEFAULT_PROMPT_TOKEN_BUDGET,
         feature_frames: int = DEFAULT_FEATURE_FRAMES,
     ) -> None:
@@ -382,8 +416,9 @@ class LocalQwenEventAnnotator:
             str(video_path),
             (
                 "Analyze this video and identify every relevant event. For each event, "
-                "provide a concise event name and description, then list the involved "
-                "objects with a label and short visual description. "
+                "provide a concise event name and a detailed description, then list the "
+                "involved objects with a label. "
+                f"{PHYSICAL_DETAILS_GUIDANCE} "
                 'Return JSON only as a list of events: [{"event_name": str, '
                 '"description": str, "involved_objects": [{"id": str, "label": str, '
                 '"physical_details": str}]}].'
@@ -434,10 +469,9 @@ class LocalQwenEventAnnotator:
             "as supporting evidence; do not treat detector labels as certain "
             "visual facts.\n\n"
             f"{DESCRIPTION_GUIDANCE}\n\n"
-            "Each involved object carries its detector track id in the id field, its "
-            "label, and physical_details recording its observable characteristics "
-            "and its part in the event: colour, type, clothing, and anything it is "
-            "carrying.\n\n"
+            "Each involved object carries its detector track id in the id field and "
+            "its label. "
+            f"{PHYSICAL_DETAILS_GUIDANCE}\n\n"
             'Return JSON only as a list of events: [{"event_name": str, '
             '"description": str, "involved_objects": [{"id": str, "label": str, '
             '"physical_details": str}]}].\n\n'
