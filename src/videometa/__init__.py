@@ -22,7 +22,9 @@ from videometa.annotation import (
     VideoEvent,
     VideoInfo,
     describe_spatial_position,
+    resolve_device,
     resolve_video_source,
+    set_verbose,
 )
 from videometa.window_annotation import (
     LVLMEventAnnotator,
@@ -60,5 +62,7 @@ __all__ = [
     "PreparedWindowInput",
     "WindowSpatialFeatureJoiner",
     "describe_spatial_position",
+    "resolve_device",
     "resolve_video_source",
+    "set_verbose",
 ]
