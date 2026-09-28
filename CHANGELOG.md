@@ -2,6 +2,36 @@
 
 <!--next-version-placeholder-->
 
+## v0.0.17 (28/09/2026)
+
+Window annotation now enumerates actions instead of narrating the window, and
+no longer loses a window when the model runs out of output tokens. Driven by a
+MEVA coverage check where 70% of windows came back as one "person walks" event
+and 10% of windows were discarded on a truncated JSON string.
+
+- `ACTION_VOCABULARY` / `ACTION_GUIDANCE`: both prompts now carry a
+  plain-English checklist of actions derived from the MEVA taxonomy (door
+  open/close, gets into/out of a vehicle, talks to a person, on a phone, picks
+  up / puts down, vehicle turns / stops / starts / reverses, ...), ask for one
+  event per subject per action, and add an `actions: [str]` field to each
+  event. `_clean_events` keeps checklist phrases in `actions` and moves anything
+  else the model wrote to `other_actions`.
+- `DESCRIPTION_GUIDANCE` asks for two to four sentences instead of four to
+  seven, and `PHYSICAL_DETAILS_GUIDANCE` for one phrase per object, so the
+  output budget is spent on more events rather than longer ones.
+- Truncated model output is salvaged: `_parse_event_list` keeps every complete
+  event before the cut instead of raising on the partial one. Both annotators
+  use it.
+- `WindowSpatialFeatureJoiner(crop_to_activity=True)` crops the annotated MP4
+  to the region holding the window's tracked people and vehicles (padded by
+  `crop_padding`, falling back to the full frame above `crop_max_area`) before
+  resizing, so a 1080p person keeps near full size at 640x360 for the same
+  video tokens. The crop is recorded in `PreparedWindowInput.crop_box`, both
+  prompts tell the model the video is a crop, and detection overlays are
+  offset accordingly. `_write_annotated_window_video` now returns
+  `(path, crop_box)`.
+
+
 ## v0.0.10 (20/09/2026)
 
 Motion gate rework. The defaults change, and `build_windows()` now returns

@@ -740,7 +740,7 @@ def test_prompt_asks_for_natural_names_and_detailed_descriptions() -> None:
     assert "person_opens_vehicle_door" in DESCRIPTION_GUIDANCE     # named as a bad example
     assert "sentence case" in DESCRIPTION_GUIDANCE
     # description: detail, with a stated length
-    assert "four to seven complete sentences" in DESCRIPTION_GUIDANCE
+    assert "two to four complete sentences" in DESCRIPTION_GUIDANCE
     assert "The end state" in DESCRIPTION_GUIDANCE
     # ordinary movement counts, so a busy window does not come back empty...
     assert "including ordinary movement" in DESCRIPTION_GUIDANCE
@@ -760,3 +760,158 @@ def test_prompts_no_longer_gate_on_the_word_relevant() -> None:
     for prompt in (hosted, local):
         assert "observable activity" in prompt
         assert "relevant event" not in prompt
+
+
+def test_both_prompts_carry_the_action_checklist() -> None:
+    from types import SimpleNamespace
+
+    from videometa.window_annotation import (
+        ACTION_GUIDANCE,
+        ACTION_VOCABULARY,
+        LVLMEventAnnotator,
+        LocalQwenEventAnnotator,
+    )
+
+    window = prepared_window()
+    hosted = LVLMEventAnnotator._build_prompt(SimpleNamespace(feature_frames=4), window)
+    local = LocalQwenEventAnnotator._build_window_prompt(None, window, 4)
+
+    for prompt in (hosted, local):
+        assert ACTION_GUIDANCE in prompt
+        assert '"actions": [str]' in prompt
+        assert "one event per subject per action" in prompt.lower()
+        assert "cropped" not in prompt          # this window shows the whole frame
+    # the classes a MEVA comparison most often misses are on the checklist
+    for action in ("opens a vehicle door", "talks to another person", "vehicle reverses",
+                   "vehicle turns right", "texts or looks at a phone",
+                   "shakes hands with or touches another person", "buys something or pays at a counter"):
+        assert action in ACTION_VOCABULARY
+
+
+def test_prompts_say_when_the_video_is_a_crop() -> None:
+    from types import SimpleNamespace
+
+    from videometa.window_annotation import LVLMEventAnnotator, LocalQwenEventAnnotator
+
+    window = replace(prepared_window(), crop_box=(100, 50, 740, 410))
+    hosted = LVLMEventAnnotator._build_prompt(SimpleNamespace(feature_frames=4), window)
+    local = LocalQwenEventAnnotator._build_window_prompt(None, window, 4)
+
+    for prompt in (hosted, local):
+        assert "cropped to the part of the camera frame" in prompt
+        assert "still refer to the full frame" in prompt
+
+
+def test_actions_are_normalised_to_the_vocabulary() -> None:
+    from videometa.window_annotation import _clean_events
+
+    cleaned = _clean_events([
+        {
+            "event_name": "Driver leaves",
+            "description": "The driver opens the door and gets out.",
+            "actions": [
+                "Opens a vehicle door.",          # case and punctuation
+                "the driver gets out of a vehicle",  # phrase embedded in a sentence
+                "waves at the camera",            # not on the checklist
+                "opens a vehicle door",           # duplicate
+                7,                                # not a string
+            ],
+        }
+    ])
+
+    assert cleaned[0]["actions"] == ["opens a vehicle door", "gets out of a vehicle"]
+    assert cleaned[0]["other_actions"] == ["waves at the camera"]
+    # a single string, a wrong type, and a missing key are all tolerated
+    assert _clean_events([{"actions": "vehicle stops"}])[0]["actions"] == ["vehicle stops"]
+    assert _clean_events([{"actions": 42}])[0]["actions"] == []
+    assert "actions" not in _clean_events([{"description": "no actions key"}])[0]
+    assert "other_actions" not in _clean_events([{"actions": ["sits down"]}])[0]
+
+
+def test_truncated_output_keeps_the_complete_events() -> None:
+    import json
+
+    import pytest
+
+    from videometa.window_annotation import _parse_event_list
+
+    cut_off = (
+        '```json\n[{"event_name": "A", "description": "one", "actions": []},\n'
+        ' {"event_name": "B", "description": "two", "actions": ["sits down"]},\n'
+        ' {"event_name": "C", "description": "the model ran out of tok'
+    )
+    assert [event["event_name"] for event in _parse_event_list(cut_off)] == ["A", "B"]
+    # the shapes both annotators receive when nothing went wrong
+    assert _parse_event_list('{"events": [{"event_name": "A"}]}') == [{"event_name": "A"}]
+    assert _parse_event_list('[{"event_name": "A"}]') == [{"event_name": "A"}]
+    # nothing complete before the cut: the original error still surfaces
+    with pytest.raises(json.JSONDecodeError):
+        _parse_event_list('[{"event_name": "brok')
+    with pytest.raises(ValueError):
+        _parse_event_list('{"no_events": 1}')
+
+
+def test_activity_crop_keeps_the_subjects_at_the_target_aspect_ratio() -> None:
+    from types import SimpleNamespace
+
+    from videometa import BoundingBox
+    from videometa.window_annotation import _activity_crop
+
+    def frame(*boxes):
+        return SimpleNamespace(
+            detections=[
+                SimpleNamespace(label=label, boundary=BoundingBox(*box)) for label, box in boxes
+            ]
+        )
+
+    # one person by a car near the bottom of a 1080p frame; the chair is furniture, not a subject
+    frames = [frame(("person", (900, 500, 960, 700)), ("car", (700, 550, 1000, 720)),
+                    ("chair", (0, 0, 1900, 1000)))]
+    crop = _activity_crop(frames, (1920, 1080), 16 / 9, padding=0.2)
+
+    assert crop is not None
+    left, top, right, bottom = crop
+    assert left <= 700 and right >= 1000 and top <= 500 and bottom >= 720
+    assert abs((right - left) / (bottom - top) - 16 / 9) < 0.05
+    assert 0 <= left < right <= 1920 and 0 <= top < bottom <= 1080
+    # subjects at opposite corners: the region would be most of the frame, so no crop
+    spread = [frame(("person", (10, 10, 100, 200)), ("car", (1500, 800, 1900, 1070)))]
+    assert _activity_crop(spread, (1920, 1080), 16 / 9) is None
+    # nothing to crop to
+    assert _activity_crop([frame(("chair", (0, 0, 50, 50)))], (1920, 1080), 16 / 9) is None
+    assert _activity_crop([], (1920, 1080), 16 / 9) is None
+
+
+def test_overlay_boxes_are_shifted_by_the_crop_offset() -> None:
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from videometa import BoundingBox
+    from videometa.window_annotation import _draw_detections
+
+    frame = np.zeros((360, 640, 3), dtype=np.uint8)
+    detection = SimpleNamespace(
+        label="person", track_id=1, confidence=0.9,
+        boundary=BoundingBox(300, 200, 400, 300), spatial_description="middle-center",
+    )
+    # crop starts at (200, 100) in the source and is scaled by 0.5: the box lands at (50, 50)-(100, 100)
+    annotated, features = _draw_detections(
+        frame, [detection], scale_x=0.5, scale_y=0.5, offset_x=200, offset_y=100
+    )
+
+    assert tuple(annotated[100, 75]) == (255, 255, 255)   # bottom edge of the shifted box
+    assert tuple(annotated[250, 300]) == (0, 0, 0)        # where the unshifted box would have been
+    assert features[0]["box_xyxy"] == [300, 200, 400, 300]  # features keep source coordinates
+
+
+def test_joiner_validates_crop_settings() -> None:
+    import pytest
+
+    joiner = WindowSpatialFeatureJoiner(crop_to_activity=True)
+    assert joiner.crop_to_activity and joiner.crop_padding == 0.2 and joiner.crop_max_area == 0.6
+    assert WindowSpatialFeatureJoiner().crop_to_activity is False
+    with pytest.raises(ValueError):
+        WindowSpatialFeatureJoiner(crop_padding=3)
+    with pytest.raises(ValueError):
+        WindowSpatialFeatureJoiner(crop_max_area=0)

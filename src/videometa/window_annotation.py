@@ -35,8 +35,8 @@ DESCRIPTION_GUIDANCE = (
     "Never use snake_case, ALL_CAPS, dataset class names or detector "
     "vocabulary such as 'person_opens_vehicle_door' or 'OBJECT_TRANSFER'.\n"
     "\n"
-    "description: four to seven complete sentences, richly detailed, written "
-    "as a chronological account. Cover, in this order where it applies:\n"
+    "description: two to four complete sentences, written as a chronological "
+    "account. Cover, briefly and in this order where it applies:\n"
     "  1. The setting and starting state: where each subject is and what it "
     "is doing when the window opens.\n"
     "  2. Each subject's appearance: colour (with shade, such as 'dark navy' "
@@ -86,14 +86,10 @@ DESCRIPTION_GUIDANCE = (
     "  event_name: 'Person loads a suitcase into a white SUV'\n"
     "  description: 'A white full-size SUV is parked nose-in to a bay beside "
     "the building entrance with its tailgate raised. A tall person in a dark "
-    "navy jacket and light trousers walks steadily along the kerb from the "
-    "left, carrying a large black hard-shell suitcase in their right hand. "
-    "They stop at the rear of the SUV, lift the suitcase with both hands into "
-    "the open boot and push it in, then lower the tailgate and press it shut. "
-    "Midway through, a small silver hatchback passes behind them along the "
-    "access road without stopping. The person then walks round the SUV's "
-    "passenger side towards the driver's door, and the SUV stays parked with "
-    "the boot now closed.'\n"
+    "navy jacket walks along the kerb from the left carrying a large black "
+    "suitcase, lifts it into the open boot and closes the tailgate. They then "
+    "walk round to the driver's door, and the SUV stays parked with the boot "
+    "closed.'\n"
     "Not acceptable:\n"
     "  event_name: 'person_unloads_vehicle'\n"
     "  description: 'car #201 moves from top-left to middle-left.'"
@@ -101,13 +97,78 @@ DESCRIPTION_GUIDANCE = (
 
 #: What `physical_details` should hold for each involved object.
 PHYSICAL_DETAILS_GUIDANCE = (
-    "For each involved object, physical_details is a full sentence or two "
-    "covering: colour (with shade) and any secondary colours or markings; "
-    "type, make or garment style; approximate size relative to the scene and "
-    "to the other objects; shape or build; anything it carries, wears, tows "
-    "or opens; where it starts and ends in the scene; how it moves (path, "
-    "pace, changes of speed or direction, stops); and exactly how it "
-    "interacts with the other involved objects."
+    "For each involved object, physical_details is one short phrase: colour "
+    "(with shade), type, make or garment style, approximate size relative to "
+    "the scene, and anything it carries, wears or tows. Movement and "
+    "interactions belong in the description, not here."
+)
+
+#: Plain-English actions the annotator must look for and name when it sees
+#: them. The list is derived from the MEVA activity taxonomy so that a
+#: downstream comparison against MEVA ground truth meets the same vocabulary,
+#: and it is phrased the way a person would say it rather than as class names.
+#:
+#: This exists because an open-ended "describe every activity" prompt comes
+#: back with one "person walks across the car park" event per window: the
+#: model summarises the most visible movement and never names the door being
+#: opened, the phone call, or the reverse out of the bay that happened in the
+#: same ten seconds.
+ACTION_VOCABULARY = (
+    # people and vehicles
+    "opens a vehicle door",
+    "closes a vehicle door",
+    "gets into a vehicle",
+    "gets out of a vehicle",
+    "opens a trunk or tailgate",
+    "closes a trunk or tailgate",
+    "loads something into a vehicle",
+    "unloads something from a vehicle",
+    # people
+    "talks to another person",
+    "talks on a phone",
+    "texts or looks at a phone",
+    "reads a document",
+    "picks up an object",
+    "puts down an object",
+    "carries a heavy object",
+    "hands an object to another person",
+    "hugs another person",
+    "shakes hands with or touches another person",
+    "buys something or pays at a counter",
+    "uses a laptop",
+    "opens a building door",
+    "closes a building door",
+    "enters through a doorway",
+    "exits through a doorway",
+    "sits down",
+    "stands up",
+    "rides a bicycle",
+    "walks through the scene",
+    # vehicles
+    "vehicle turns left",
+    "vehicle turns right",
+    "vehicle makes a U-turn",
+    "vehicle stops",
+    "vehicle starts moving",
+    "vehicle reverses",
+    "vehicle drops off a person",
+    "vehicle picks up a person",
+    "vehicle drives through the scene",
+)
+
+ACTION_GUIDANCE = (
+    "Before writing, go through this checklist for EVERY person and EVERY "
+    "vehicle in the window and decide which of these actions you can actually "
+    "see: "
+    + "; ".join(ACTION_VOCABULARY)
+    + ".\n"
+    "Return one event per subject per action. A person who gets out of a car, "
+    "closes its door and then talks to someone is three events, not one. "
+    "Ordinary walking or driving is also an event, but never let it stand in "
+    "for a more specific action that is visible in the same window.\n"
+    "Each event carries an actions list holding the checklist phrases it "
+    "shows, copied exactly, and the description must state each of those "
+    "actions in words. Do not list an action you cannot see."
 )
 
 #: Legend for the compact spatial features, framed so the grid vocabulary reads
@@ -144,6 +205,20 @@ class PreparedWindowInput:
     image_messages: tuple[dict[str, Any], ...]
     artifact_directory: str | None
     annotated_video_path: str | None
+    #: (left, top, right, bottom) source-frame pixels the annotated video shows,
+    #: or None when it shows the whole frame.
+    crop_box: tuple[int, int, int, int] | None = None
+
+
+def _crop_note(prepared_input: PreparedWindowInput) -> str:
+    """One sentence telling the model the video is a crop, so grid cells still make sense."""
+    if getattr(prepared_input, "crop_box", None) is None:
+        return ""
+    return (
+        "The video is cropped to the part of the camera frame where the tracked "
+        "subjects are, so they appear larger than in the full frame; the "
+        "frame-grid cells in the features below still refer to the full frame. "
+    )
 
 
 class WindowSpatialFeatureJoiner:
@@ -157,8 +232,22 @@ class WindowSpatialFeatureJoiner:
         annotated_video_fps: float = 2.0,
         annotated_video_max_frames: int = 32,
         encode_frame_images: bool = False,
+        crop_to_activity: bool = False,
+        crop_padding: float = 0.2,
+        crop_max_area: float = 0.6,
     ) -> None:
         """Configure artifact output and the Qwen MP4 size and frame rate.
+
+        ``crop_to_activity`` crops the annotated MP4 to the region holding the
+        window's tracked people and vehicles before resizing it, instead of
+        shrinking the whole frame. A 1080p camera resized to 640x360 turns a
+        200 px person into a 70 px one, and door, phone and trunk actions are
+        no longer readable at that size; cropping keeps them near full size
+        for the same number of video tokens. ``crop_padding`` widens the
+        region by that fraction on each axis, and when the padded region would
+        exceed ``crop_max_area`` of the frame the whole frame is used because
+        cropping would buy nothing. The crop is recorded in
+        ``PreparedWindowInput.crop_box``.
 
         ``encode_frame_images`` controls whether every window frame is also
         base64-encoded into ``image_messages``. Only the remote OpenAI-style
@@ -178,6 +267,13 @@ class WindowSpatialFeatureJoiner:
         self.annotated_video_fps = annotated_video_fps
         self.annotated_video_max_frames = annotated_video_max_frames
         self.encode_frame_images = encode_frame_images
+        if not 0 <= crop_padding <= 2:
+            raise ValueError("crop_padding must be within [0, 2].")
+        if not 0 < crop_max_area <= 1:
+            raise ValueError("crop_max_area must be within (0, 1].")
+        self.crop_to_activity = crop_to_activity
+        self.crop_padding = crop_padding
+        self.crop_max_area = crop_max_area
 
     def prepare(
         self, video_path: str | Path, annotation: ObjectWindowAnnotations
@@ -265,13 +361,16 @@ class WindowSpatialFeatureJoiner:
             (artifact_directory / "spatial_features.json").write_text(
                 json.dumps(frame_features, indent=2), encoding="utf-8"
             )
-        annotated_video_path = _write_annotated_window_video(
+        annotated_video_path, crop_box = _write_annotated_window_video(
             str(video_path),
             frame_annotations,
             artifact_directory,
             target_size=self.annotated_video_size,
             target_fps=self.annotated_video_fps,
             max_frames=self.annotated_video_max_frames,
+            crop_to_activity=self.crop_to_activity,
+            crop_padding=self.crop_padding,
+            crop_max_area=self.crop_max_area,
         )
         prepared = PreparedWindowInput(
             window.start_seconds,
@@ -281,6 +380,7 @@ class WindowSpatialFeatureJoiner:
             tuple(image_messages),
             str(artifact_directory) if artifact_directory else None,
             str(annotated_video_path) if annotated_video_path else None,
+            crop_box,
         )
         logger.info(
             "Prepared window %.3fs-%.3fs (%d frames, artifacts: %s)",
@@ -330,11 +430,14 @@ class LVLMEventAnnotator:
             "boundaries labelled as `class #track_id`. "
             "Use the images and the spatial features to identify every observable "
             "activity. "
-            "Detector labels are supporting evidence, not certain visual facts.\n\n"
+            "Detector labels are supporting evidence, not certain visual facts. "
+            f"{_crop_note(prepared_input)}\n\n"
             f"{DESCRIPTION_GUIDANCE}\n\n"
+            f"{ACTION_GUIDANCE}\n\n"
             f"{PHYSICAL_DETAILS_GUIDANCE}\n\n"
             'Return JSON only: {"events": [{"event_name": str, "description": str, '
-            '"involved_objects": [{"id": str, "label": str, "physical_details": str}]}]}.\n\n'
+            '"actions": [str], "involved_objects": [{"id": str, "label": str, '
+            '"physical_details": str}]}]}.\n\n'
             f"{FEATURE_LEGEND}\n"
             f"{_compact_json(_compact_object_features(prepared_input.object_features))}\n\n"
             f"{FRAME_LEGEND}\n"
@@ -352,10 +455,7 @@ class LVLMEventAnnotator:
             temperature=0,
             max_tokens=1600,
         )
-        parsed = json.loads(_strip_json_fence(response.choices[0].message.content))
-        if not isinstance(parsed, dict) or not isinstance(parsed.get("events"), list):
-            raise ValueError("LVLM response must be a JSON object containing an events list.")
-        return _clean_events(parsed["events"])
+        return _clean_events(_parse_event_list(response.choices[0].message.content))
 
 
 class LocalQwenEventAnnotator:
@@ -467,14 +567,15 @@ class LocalQwenEventAnnotator:
             "only the objects involved. The overlays show detector boundaries "
             "labelled as `class #track_id`. Use the video and the spatial features "
             "as supporting evidence; do not treat detector labels as certain "
-            "visual facts.\n\n"
+            f"visual facts. {_crop_note(prepared_input)}\n\n"
             f"{DESCRIPTION_GUIDANCE}\n\n"
+            f"{ACTION_GUIDANCE}\n\n"
             "Each involved object carries its detector track id in the id field and "
             "its label. "
             f"{PHYSICAL_DETAILS_GUIDANCE}\n\n"
             'Return JSON only as a list of events: [{"event_name": str, '
-            '"description": str, "involved_objects": [{"id": str, "label": str, '
-            '"physical_details": str}]}].\n\n'
+            '"description": str, "actions": [str], "involved_objects": [{"id": str, '
+            '"label": str, "physical_details": str}]}].\n\n'
             f"{FEATURE_LEGEND}\n"
             f"{_compact_json(_compact_object_features(prepared_input.object_features))}\n\n"
             f"{FRAME_LEGEND}\n"
@@ -523,11 +624,7 @@ class LocalQwenEventAnnotator:
             # every call whether or not generation succeeded.
             mx.clear_cache()
         output_text = output.text if hasattr(output, "text") else str(output)
-        parsed = json.loads(_strip_json_fence(output_text))
-        if isinstance(parsed, dict):
-            parsed = parsed.get("events")
-        if not isinstance(parsed, list):
-            raise ValueError("Local Qwen response must be a JSON event list.")
+        parsed = _parse_event_list(output_text)
         logger.info("Local Qwen returned %d events for %s", len(parsed), video_path)
         return _clean_events(parsed)
 
@@ -645,10 +742,17 @@ def _write_annotated_window_video(
     target_size: tuple[int, int] | None = None,
     target_fps: float | None = None,
     max_frames: int = 32,
-) -> Path | None:
-    """Persist an annotated MP4 for a window when artifact output is enabled."""
+    crop_to_activity: bool = False,
+    crop_padding: float = 0.2,
+    crop_max_area: float = 0.6,
+) -> tuple[Path | None, tuple[int, int, int, int] | None]:
+    """Persist an annotated MP4 for a window when artifact output is enabled.
+
+    Returns the video path and the source-frame crop it shows: both None when
+    nothing was written, and the crop None when the whole frame was used.
+    """
     if artifact_directory is None or not frame_annotations:
-        return None
+        return None, None
     import cv2
 
     capture = cv2.VideoCapture(video_path)
@@ -659,16 +763,33 @@ def _write_annotated_window_video(
     source_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     source_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     width, height = target_size or (source_width, source_height)
-    scale_x = width / source_width
-    scale_y = height / source_height
+    crop_box = None
+    if crop_to_activity:
+        crop_box = _activity_crop(
+            frame_annotations,
+            (source_width, source_height),
+            width / height,
+            padding=crop_padding,
+            max_area=crop_max_area,
+        )
+    if crop_box is None:
+        offset_x, offset_y = 0, 0
+        region_width, region_height = source_width, source_height
+    else:
+        offset_x, offset_y = crop_box[0], crop_box[1]
+        region_width = crop_box[2] - crop_box[0]
+        region_height = crop_box[3] - crop_box[1]
+    scale_x = width / region_width
+    scale_y = height / region_height
     output_path = artifact_directory / "annotated_window.mp4"
     selected = _select_frames_by_time(frame_annotations, fps, max_frames)
     logger.info(
-        "Writing annotated window video at %dx%d, %.2f FPS, %d frames: %s",
+        "Writing annotated window video at %dx%d, %.2f FPS, %d frames, crop %s: %s",
         width,
         height,
         fps,
         len(selected),
+        crop_box or "none",
         output_path,
     )
     writer = _open_mp4_writer(output_path, fps, (width, height))
@@ -678,13 +799,17 @@ def _write_annotated_window_video(
     written = 0
     try:
         for frame_annotation, frame in _iter_source_frames(capture, selected):
-            if (width, height) != (source_width, source_height):
+            if crop_box is not None:
+                frame = frame[crop_box[1]:crop_box[3], crop_box[0]:crop_box[2]]
+            if (width, height) != (region_width, region_height):
                 frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
             annotated, _ = _draw_detections(
                 frame,
                 frame_annotation.detections,
                 scale_x=scale_x,
                 scale_y=scale_y,
+                offset_x=offset_x,
+                offset_y=offset_y,
             )
             writer.write(annotated)
             written += 1
@@ -694,7 +819,63 @@ def _write_annotated_window_video(
     if written == 0:
         raise OSError(f"Annotated window video is empty: {output_path}")
     logger.info("Wrote annotated window video (%d frames): %s", written, output_path)
-    return output_path
+    return output_path, crop_box
+
+
+#: Detector labels that mark where the activity is when cropping a window.
+_CROP_LABELS = frozenset({"person", "car", "truck", "bus", "motorcycle", "bicycle"})
+
+
+def _activity_crop(
+    frame_annotations: Sequence[Any],
+    frame_size: tuple[int, int],
+    aspect: float,
+    *,
+    padding: float = 0.2,
+    max_area: float = 0.6,
+) -> tuple[int, int, int, int] | None:
+    """Smallest region at the target aspect ratio holding every tracked person or vehicle.
+
+    Returns ``(left, top, right, bottom)`` in source pixels, or None when the
+    window has no such tracks or the region would already cover more than
+    ``max_area`` of the frame, in which case cropping buys no resolution.
+    """
+    width, height = frame_size
+    boxes = [
+        detection.boundary
+        for frame in frame_annotations
+        for detection in frame.detections
+        if detection.label in _CROP_LABELS
+    ]
+    if not boxes or width <= 0 or height <= 0:
+        return None
+    left = min(box.left for box in boxes)
+    top = min(box.top for box in boxes)
+    right = max(box.right for box in boxes)
+    bottom = max(box.bottom for box in boxes)
+    crop_width = (right - left) * (1 + padding)
+    crop_height = (bottom - top) * (1 + padding)
+    if crop_width <= 0 or crop_height <= 0:
+        return None
+    # Grow the shorter side to the target aspect ratio so the resize does not
+    # distort, then clamp to the frame.
+    if crop_width / crop_height < aspect:
+        crop_width = crop_height * aspect
+    else:
+        crop_height = crop_width / aspect
+    crop_width = min(crop_width, width)
+    crop_height = min(crop_height, height)
+    if crop_width * crop_height > max_area * width * height:
+        return None
+    centre_x = (left + right) / 2
+    centre_y = (top + bottom) / 2
+    x0 = int(round(max(0.0, min(centre_x - crop_width / 2, width - crop_width))))
+    y0 = int(round(max(0.0, min(centre_y - crop_height / 2, height - crop_height))))
+    x1 = int(round(min(width, x0 + crop_width)))
+    y1 = int(round(min(height, y0 + crop_height)))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    return x0, y0, x1, y1
 
 
 def _open_mp4_writer(output_path: Path, fps: float, size: tuple[int, int]):
@@ -738,6 +919,8 @@ def _draw_detections(
     *,
     scale_x: float = 1.0,
     scale_y: float = 1.0,
+    offset_x: float = 0.0,
+    offset_y: float = 0.0,
 ) -> tuple[Any, list[dict[str, Any]]]:
     import cv2
 
@@ -753,10 +936,10 @@ def _draw_detections(
     boxes: list[tuple[Any, tuple[int, int, int, int]]] = []
     for detection in detections:
         box = (
-            round(detection.boundary.left * scale_x),
-            round(detection.boundary.top * scale_y),
-            round(detection.boundary.right * scale_x),
-            round(detection.boundary.bottom * scale_y),
+            round((detection.boundary.left - offset_x) * scale_x),
+            round((detection.boundary.top - offset_y) * scale_y),
+            round((detection.boundary.right - offset_x) * scale_x),
+            round((detection.boundary.bottom - offset_y) * scale_y),
         )
         boxes.append((detection, box))
         cv2.rectangle(annotated, box[:2], box[2:], border_color, box_thickness)
@@ -849,6 +1032,87 @@ def _strip_track_ids(text: str) -> str:
     return re.sub(r"\s+([,.;:])", r"\1", cleaned).strip()
 
 
+_ACTION_LOOKUP = {action.lower(): action for action in ACTION_VOCABULARY}
+
+
+def _normalise_actions(value: Any) -> tuple[list[str], list[str]]:
+    """Split the model's actions into checklist phrases and anything else it wrote.
+
+    A phrase is kept as a checklist action when, after trimming case and
+    punctuation, it equals a vocabulary entry or contains one ("the driver
+    opens a vehicle door" still counts). Everything else goes to
+    ``other_actions`` so a real observation outside the vocabulary is not
+    silently dropped.
+    """
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        return [], []
+    known: list[str] = []
+    other: list[str] = []
+    for raw in value:
+        if not isinstance(raw, str):
+            continue
+        text = re.sub(r"\s+", " ", raw).strip().strip(".;,").strip().lower()
+        if not text:
+            continue
+        match = _ACTION_LOOKUP.get(text)
+        if match is None:
+            match = next(
+                (action for phrase, action in _ACTION_LOOKUP.items() if phrase in text),
+                None,
+            )
+        if match is None:
+            if raw.strip() not in other:
+                other.append(raw.strip())
+        elif match not in known:
+            known.append(match)
+    return known, other
+
+
+def _salvage_events(text: str) -> list[dict[str, Any]]:
+    """Decode the leading complete objects of a JSON event array whose tail is missing.
+
+    A model that runs out of output tokens stops mid-string, and one bad
+    character would otherwise cost the whole window. The objects before the
+    cut are intact, so they are kept and the partial one is dropped.
+    """
+    start = text.find("[")
+    if start < 0:
+        return []
+    decoder = json.JSONDecoder()
+    position = start + 1
+    events: list[dict[str, Any]] = []
+    while True:
+        while position < len(text) and text[position] in " \t\r\n,":
+            position += 1
+        if position >= len(text) or text[position] != "{":
+            break
+        try:
+            event, position = decoder.raw_decode(text, position)
+        except json.JSONDecodeError:
+            break
+        events.append(event)
+    return events
+
+
+def _parse_event_list(content: str) -> list[Any]:
+    """Parse the model's JSON, keeping every complete event when the output was cut off."""
+    cleaned = _strip_json_fence(content)
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        parsed = _salvage_events(cleaned)
+        if not parsed:
+            raise
+        logger.warning("Model output was truncated; salvaged %d complete events", len(parsed))
+    if isinstance(parsed, dict):
+        parsed = parsed.get("events")
+    if not isinstance(parsed, list):
+        raise ValueError("Model response must be a JSON event list.")
+    return parsed
+
+
 def _clean_events(events: Sequence[Any]) -> list[Any]:
     """Enforce the description rules on whatever the model actually returned."""
     cleaned: list[Any] = []
@@ -860,6 +1124,10 @@ def _clean_events(events: Sequence[Any]) -> list[Any]:
         for key in ("event_name", "description"):
             if isinstance(item.get(key), str):
                 item[key] = _strip_track_ids(item[key])
+        if "actions" in item:
+            item["actions"], other_actions = _normalise_actions(item["actions"])
+            if other_actions:
+                item["other_actions"] = other_actions
         objects = item.get("involved_objects")
         if isinstance(objects, list):
             item["involved_objects"] = [
