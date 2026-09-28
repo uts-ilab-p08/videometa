@@ -2,6 +2,24 @@
 
 <!--next-version-placeholder-->
 
+## v0.0.18 (28/09/2026)
+
+Follow-up to 0.0.17 after a pilot on one MEVA camera: the crop never engaged
+in a car park and the model padded its answer with repeated events.
+
+- `crop_to_activity` now crops around the window's *actors*: the people plus
+  every vehicle that moves, then moving tracks only, then people only, taking
+  the first set that fits under `crop_max_area`. Parked cars are scenery, and
+  the union of all tracked vehicles was the whole frame on every window.
+- `action_vocabulary` is a constructor parameter of `LVLMEventAnnotator` and
+  `LocalQwenEventAnnotator`: pass your dataset's own action list, or None to
+  drop the checklist. `action_guidance(vocabulary)` builds the prompt block;
+  `ACTION_VOCABULARY` stays as the default. The annotators are not tied to
+  any one evaluation dataset.
+- `_clean_events` drops exact duplicate events (same name and description)
+  within one reply.
+
+
 ## v0.0.17 (28/09/2026)
 
 Window annotation now enumerates actions instead of narrating the window, and

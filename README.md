@@ -219,6 +219,12 @@ asks for one event per subject per action, and adds an `actions` list to every
 event. After the reply, checklist phrases are kept in `actions` (normalised to
 the vocabulary) and anything else the model wrote goes to `other_actions`.
 
+The checklist is a parameter, not a fixed part of the package: pass
+`action_vocabulary=(...)` to either annotator with the actions your own dataset
+or evaluation cares about, or `action_vocabulary=None` to drop the checklist and
+let the model name actions freely. Exact duplicate events in one reply are
+dropped.
+
 Two related guards: descriptions are asked for in two to four sentences and
 `physical_details` in one phrase, so the output budget goes to more events
 rather than longer ones, and a reply cut off by the token limit is salvaged
@@ -228,8 +234,9 @@ costing the whole window.
 #### Crop the video to the action
 
 `WindowSpatialFeatureJoiner(crop_to_activity=True)` writes the annotated MP4
-from the region holding the window's tracked people and vehicles, padded by
-`crop_padding` (20%), instead of shrinking the whole frame. On a 1080p camera
+from the region around the window's actors, the people plus every vehicle that
+moves (a parked car is scenery), padded by `crop_padding` (20%), instead of
+shrinking the whole frame. On a 1080p camera
 resized to 640x360 a 200 px person becomes 70 px and a door or phone is no
 longer readable; the crop keeps them near full size for the same number of
 video tokens. When the region would exceed `crop_max_area` (60%) of the frame

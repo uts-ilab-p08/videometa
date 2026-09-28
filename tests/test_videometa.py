@@ -851,34 +851,55 @@ def test_truncated_output_keeps_the_complete_events() -> None:
         _parse_event_list('{"no_events": 1}')
 
 
-def test_activity_crop_keeps_the_subjects_at_the_target_aspect_ratio() -> None:
+def test_activity_crop_follows_the_actors_not_the_parked_cars() -> None:
     from types import SimpleNamespace
 
     from videometa import BoundingBox
     from videometa.window_annotation import _activity_crop
 
-    def frame(*boxes):
+    def frame(index, *boxes):
         return SimpleNamespace(
+            frame_index=index,
             detections=[
-                SimpleNamespace(label=label, boundary=BoundingBox(*box)) for label, box in boxes
-            ]
+                SimpleNamespace(track_id=tid, label=label, boundary=BoundingBox(*box))
+                for tid, label, box in boxes
+            ],
         )
 
-    # one person by a car near the bottom of a 1080p frame; the chair is furniture, not a subject
-    frames = [frame(("person", (900, 500, 960, 700)), ("car", (700, 550, 1000, 720)),
-                    ("chair", (0, 0, 1900, 1000)))]
+    # A car park: parked cars in every corner, one person walking past a car near the bottom.
+    parked = [(10, "car", (0, 0, 300, 150)), (11, "car", (1600, 0, 1920, 150)),
+              (12, "car", (0, 900, 300, 1080)), (13, "car", (1600, 900, 1920, 1080))]
+    frames = [
+        frame(0, *parked, (1, "person", (900, 500, 960, 700)), (2, "car", (700, 550, 1000, 720))),
+        frame(30, *parked, (1, "person", (1100, 500, 1160, 700)), (2, "car", (700, 550, 1000, 720))),
+    ]
     crop = _activity_crop(frames, (1920, 1080), 16 / 9, padding=0.2)
 
     assert crop is not None
     left, top, right, bottom = crop
-    assert left <= 700 and right >= 1000 and top <= 500 and bottom >= 720
+    assert left <= 900 and right >= 1160 and top <= 500 and bottom >= 700   # the walking person
+    assert right - left < 1920 * 0.8                                         # not the whole car park
     assert abs((right - left) / (bottom - top) - 16 / 9) < 0.05
     assert 0 <= left < right <= 1920 and 0 <= top < bottom <= 1080
-    # subjects at opposite corners: the region would be most of the frame, so no crop
-    spread = [frame(("person", (10, 10, 100, 200)), ("car", (1500, 800, 1900, 1070)))]
+
+    # A single moving car and no people: crop follows the car.
+    driving = [frame(0, *parked, (3, "car", (200, 400, 500, 600))),
+               frame(30, *parked, (3, "car", (900, 400, 1200, 600)))]
+    left, top, right, bottom = _activity_crop(driving, (1920, 1080), 16 / 9)
+    assert left <= 200 and right >= 1200 and top <= 400 and bottom >= 600
+
+    # A lone distant person: the crop is never smaller than min_size, so it is not upscaled into a blur.
+    tiny = [frame(0, (4, "person", (1000, 300, 1020, 350)))]
+    left, top, right, bottom = _activity_crop(tiny, (1920, 1080), 16 / 9, min_size=(640, 360))
+    assert right - left >= 640 and bottom - top >= 360
+    assert left <= 1000 and right >= 1020 and top <= 300 and bottom >= 350
+    assert abs((right - left) / (bottom - top) - 16 / 9) < 0.05
+
+    # Nothing moves and nobody is there: the whole frame.
+    assert _activity_crop([frame(0, *parked)], (1920, 1080), 16 / 9) is None
+    # People at opposite corners: too wide to help, so the whole frame.
+    spread = [frame(0, (1, "person", (10, 10, 100, 200)), (2, "person", (1800, 850, 1900, 1070)))]
     assert _activity_crop(spread, (1920, 1080), 16 / 9) is None
-    # nothing to crop to
-    assert _activity_crop([frame(("chair", (0, 0, 50, 50)))], (1920, 1080), 16 / 9) is None
     assert _activity_crop([], (1920, 1080), 16 / 9) is None
 
 
@@ -915,3 +936,45 @@ def test_joiner_validates_crop_settings() -> None:
         WindowSpatialFeatureJoiner(crop_padding=3)
     with pytest.raises(ValueError):
         WindowSpatialFeatureJoiner(crop_max_area=0)
+
+
+def test_duplicate_events_are_dropped() -> None:
+    from videometa.window_annotation import _clean_events
+
+    event = {"event_name": "Person walks across the car park", "description": "A person walks.",
+             "actions": [], "involved_objects": []}
+    cleaned = _clean_events([event, dict(event), {**event, "description": "A person runs."}])
+
+    assert len(cleaned) == 2
+    assert [item["description"] for item in cleaned] == ["A person walks.", "A person runs."]
+    # events with no text at all are never treated as duplicates of each other
+    assert len(_clean_events([{"involved_objects": []}, {"involved_objects": []}])) == 2
+
+
+def test_action_vocabulary_is_a_parameter() -> None:
+    from types import SimpleNamespace
+
+    from videometa.window_annotation import (
+        ACTION_GUIDANCE,
+        LVLMEventAnnotator,
+        LocalQwenEventAnnotator,
+        _clean_events,
+        action_guidance,
+    )
+
+    window = prepared_window()
+    # no vocabulary: no checklist block in either prompt
+    free = SimpleNamespace(feature_frames=4, action_vocabulary=None)
+    assert "checklist" not in LVLMEventAnnotator._build_prompt(free, window)
+    assert "checklist" not in LocalQwenEventAnnotator._build_window_prompt(free, window, 4)
+    assert action_guidance(None) == ""
+    # a dataset's own vocabulary replaces the default one
+    custom = SimpleNamespace(feature_frames=4, action_vocabulary=("kicks a ball", "scores a goal"))
+    prompt = LVLMEventAnnotator._build_prompt(custom, window)
+    assert "kicks a ball" in prompt and "opens a vehicle door" not in prompt
+    cleaned = _clean_events([{"actions": ["Kicks a ball", "opens a vehicle door"]}],
+                            vocabulary=custom.action_vocabulary)
+    assert cleaned[0]["actions"] == ["kicks a ball"]
+    assert cleaned[0]["other_actions"] == ["opens a vehicle door"]
+    # objects without the attribute (older callers, tests) keep the default checklist
+    assert ACTION_GUIDANCE in LocalQwenEventAnnotator._build_window_prompt(None, window, 4)
