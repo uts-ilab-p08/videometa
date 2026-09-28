@@ -156,20 +156,33 @@ ACTION_VOCABULARY = (
     "vehicle drives through the scene",
 )
 
-ACTION_GUIDANCE = (
-    "Before writing, go through this checklist for EVERY person and EVERY "
-    "vehicle in the window and decide which of these actions you can actually "
-    "see: "
-    + "; ".join(ACTION_VOCABULARY)
-    + ".\n"
-    "Return one event per subject per action. A person who gets out of a car, "
-    "closes its door and then talks to someone is three events, not one. "
-    "Ordinary walking or driving is also an event, but never let it stand in "
-    "for a more specific action that is visible in the same window.\n"
-    "Each event carries an actions list holding the checklist phrases it "
-    "shows, copied exactly, and the description must state each of those "
-    "actions in words. Do not list an action you cannot see."
-)
+def action_guidance(vocabulary: Sequence[str] | None = ACTION_VOCABULARY) -> str:
+    """The checklist block for a prompt, or an empty string when no vocabulary is set.
+
+    The vocabulary is a parameter so the annotators work for any dataset:
+    pass the actions your evaluation cares about, or None to let the model
+    name actions freely.
+    """
+    if not vocabulary:
+        return ""
+    return (
+        "Before writing, go through this checklist for EVERY person and EVERY "
+        "vehicle in the window and decide which of these actions you can actually "
+        "see: "
+        + "; ".join(vocabulary)
+        + ".\n"
+        "Return one event per subject per action. A person who gets out of a car, "
+        "closes its door and then talks to someone is three events, not one. "
+        "Ordinary walking or driving is also an event, but never let it stand in "
+        "for a more specific action that is visible in the same window.\n"
+        "Each event carries an actions list holding the checklist phrases it "
+        "shows, copied exactly, and the description must state each of those "
+        "actions in words. Do not list an action you cannot see."
+    )
+
+
+#: The checklist block built from the default vocabulary.
+ACTION_GUIDANCE = action_guidance(ACTION_VOCABULARY)
 
 #: Legend for the compact spatial features, framed so the grid vocabulary reads
 #: as a lookup hint rather than as description material.
@@ -412,7 +425,11 @@ class LVLMEventAnnotator:
         model: str,
         *,
         feature_frames: int = DEFAULT_FEATURE_FRAMES,
+        action_vocabulary: Sequence[str] | None = ACTION_VOCABULARY,
     ) -> None:
+        """``action_vocabulary`` is the checklist the model is asked to name actions
+        from (see `ACTION_VOCABULARY`); pass your dataset's own list, or None to
+        drop the checklist and let the model describe actions freely."""
         if not base_url or not api_key:
             raise ValueError("base_url and api_key are required")
         try:
@@ -422,6 +439,7 @@ class LVLMEventAnnotator:
         self.client = OpenAI(base_url=base_url, api_key=api_key)
         self.model = model
         self.feature_frames = feature_frames
+        self.action_vocabulary = tuple(action_vocabulary) if action_vocabulary else None
 
     def _build_prompt(self, prepared_input: PreparedWindowInput) -> str:
         return (
@@ -433,7 +451,7 @@ class LVLMEventAnnotator:
             "Detector labels are supporting evidence, not certain visual facts. "
             f"{_crop_note(prepared_input)}\n\n"
             f"{DESCRIPTION_GUIDANCE}\n\n"
-            f"{ACTION_GUIDANCE}\n\n"
+            f"{action_guidance(_vocabulary_of(self))}\n\n"
             f"{PHYSICAL_DETAILS_GUIDANCE}\n\n"
             'Return JSON only: {"events": [{"event_name": str, "description": str, '
             '"actions": [str], "involved_objects": [{"id": str, "label": str, '
@@ -455,7 +473,10 @@ class LVLMEventAnnotator:
             temperature=0,
             max_tokens=1600,
         )
-        return _clean_events(_parse_event_list(response.choices[0].message.content))
+        return _clean_events(
+            _parse_event_list(response.choices[0].message.content),
+            vocabulary=_vocabulary_of(self),
+        )
 
 
 class LocalQwenEventAnnotator:
@@ -469,7 +490,11 @@ class LocalQwenEventAnnotator:
         max_tokens: int = 1200,
         prompt_token_budget: int = DEFAULT_PROMPT_TOKEN_BUDGET,
         feature_frames: int = DEFAULT_FEATURE_FRAMES,
+        action_vocabulary: Sequence[str] | None = ACTION_VOCABULARY,
     ) -> None:
+        """``action_vocabulary`` is the checklist the model is asked to name actions
+        from (see `ACTION_VOCABULARY`); pass your dataset's own list, or None to
+        drop the checklist and let the model describe actions freely."""
         try:
             from mlx_vlm import load
         except ImportError as error:
@@ -481,6 +506,7 @@ class LocalQwenEventAnnotator:
         self.max_tokens = max_tokens
         self.prompt_token_budget = prompt_token_budget
         self.feature_frames = feature_frames
+        self.action_vocabulary = tuple(action_vocabulary) if action_vocabulary else None
         logger.info("Loaded local Qwen model: %s", model_id)
 
     def annotate(
@@ -569,7 +595,7 @@ class LocalQwenEventAnnotator:
             "as supporting evidence; do not treat detector labels as certain "
             f"visual facts. {_crop_note(prepared_input)}\n\n"
             f"{DESCRIPTION_GUIDANCE}\n\n"
-            f"{ACTION_GUIDANCE}\n\n"
+            f"{action_guidance(_vocabulary_of(self))}\n\n"
             "Each involved object carries its detector track id in the id field and "
             "its label. "
             f"{PHYSICAL_DETAILS_GUIDANCE}\n\n"
@@ -626,7 +652,7 @@ class LocalQwenEventAnnotator:
         output_text = output.text if hasattr(output, "text") else str(output)
         parsed = _parse_event_list(output_text)
         logger.info("Local Qwen returned %d events for %s", len(parsed), video_path)
-        return _clean_events(parsed)
+        return _clean_events(parsed, vocabulary=_vocabulary_of(self))
 
 
 def _compact_json(value: Any) -> str:
@@ -771,6 +797,7 @@ def _write_annotated_window_video(
             width / height,
             padding=crop_padding,
             max_area=crop_max_area,
+            min_size=(width / _CROP_MAX_UPSCALE, height / _CROP_MAX_UPSCALE),
         )
     if crop_box is None:
         offset_x, offset_y = 0, 0
@@ -833,21 +860,89 @@ def _activity_crop(
     *,
     padding: float = 0.2,
     max_area: float = 0.6,
+    min_size: tuple[float, float] | None = None,
 ) -> tuple[int, int, int, int] | None:
-    """Smallest region at the target aspect ratio holding every tracked person or vehicle.
+    """Smallest region at the target aspect ratio around the window's actors.
 
-    Returns ``(left, top, right, bottom)`` in source pixels, or None when the
-    window has no such tracks or the region would already cover more than
-    ``max_area`` of the frame, in which case cropping buys no resolution.
+    The actors are the people in the window plus every vehicle that moves;
+    a parked car is scenery. In a car park the union of *all* tracked vehicles
+    is the whole frame, so cropping to it never engaged. Three candidate sets
+    are tried in order and the first one that fits under ``max_area`` wins:
+    people plus moving vehicles, moving tracks only, people only.
+
+    ``min_size`` is the smallest ``(width, height)`` the region may have, so a
+    lone distant person is not blown up into a blur; the writer passes half
+    its output size, which caps the upscale at 2x.
+
+    Returns ``(left, top, right, bottom)`` in source pixels, or None when no
+    candidate fits, in which case the whole frame is used.
     """
     width, height = frame_size
-    boxes = [
-        detection.boundary
-        for frame in frame_annotations
-        for detection in frame.detections
-        if detection.label in _CROP_LABELS
-    ]
-    if not boxes or width <= 0 or height <= 0:
+    if width <= 0 or height <= 0:
+        return None
+    tracks: dict[Any, dict[str, Any]] = {}
+    for frame in frame_annotations:
+        for detection in frame.detections:
+            if detection.label not in _CROP_LABELS:
+                continue
+            track = tracks.setdefault(
+                detection.track_id,
+                {"label": detection.label, "first": detection.boundary, "boxes": []},
+            )
+            track["boxes"].append(detection.boundary)
+            track["last"] = detection.boundary
+    if not tracks:
+        return None
+    diagonal = (width**2 + height**2) ** 0.5
+    people: list[Any] = []
+    moving: list[Any] = []
+    moving_vehicles: list[Any] = []
+    for track in tracks.values():
+        first, last = track["first"], track["last"]
+        travelled = _centre_distance(first, last)
+        size = ((first.right - first.left) ** 2 + (first.bottom - first.top) ** 2) ** 0.5
+        is_moving = travelled > _CROP_MOVING_FRACTION * diagonal or travelled > 0.5 * size
+        if track["label"] == "person":
+            people.extend(track["boxes"])
+        elif is_moving:
+            moving_vehicles.extend(track["boxes"])
+        if is_moving:
+            moving.extend(track["boxes"])
+    for boxes in (people + moving_vehicles, moving, people):
+        crop = _fit_crop(boxes, (width, height), aspect, padding, max_area, min_size)
+        if crop is not None:
+            return crop
+    return None
+
+
+#: The most a crop may be enlarged on its way to the output size. Beyond 2x a
+#: distant figure is a smear of upscaled pixels and the model gains nothing.
+_CROP_MAX_UPSCALE = 2.0
+
+#: Fraction of the frame diagonal a track's centre must travel to count as
+#: moving. Two percent of a 1080p diagonal is 44 px, above tracker jitter and
+#: below anything that walks or drives.
+_CROP_MOVING_FRACTION = 0.02
+
+
+def _centre_distance(first: Any, second: Any) -> float:
+    return (
+        ((first.left + first.right) / 2 - (second.left + second.right) / 2) ** 2
+        + ((first.top + first.bottom) / 2 - (second.top + second.bottom) / 2) ** 2
+    ) ** 0.5
+
+
+def _fit_crop(
+    boxes: Sequence[Any],
+    frame_size: tuple[int, int],
+    aspect: float,
+    padding: float,
+    max_area: float,
+    min_size: tuple[float, float] | None = None,
+) -> tuple[int, int, int, int] | None:
+    """The padded, aspect-corrected region around ``boxes``, or None when it is too large."""
+    width, height = frame_size
+    if not boxes:
         return None
     left = min(box.left for box in boxes)
     top = min(box.top for box in boxes)
@@ -862,6 +957,9 @@ def _activity_crop(
     if crop_width / crop_height < aspect:
         crop_width = crop_height * aspect
     else:
+        crop_height = crop_width / aspect
+    if min_size is not None:
+        crop_width = max(crop_width, min_size[0], min_size[1] * aspect)
         crop_height = crop_width / aspect
     crop_width = min(crop_width, width)
     crop_height = min(crop_height, height)
@@ -1032,10 +1130,16 @@ def _strip_track_ids(text: str) -> str:
     return re.sub(r"\s+([,.;:])", r"\1", cleaned).strip()
 
 
-_ACTION_LOOKUP = {action.lower(): action for action in ACTION_VOCABULARY}
+def _vocabulary_of(annotator: Any) -> tuple[str, ...] | None:
+    """The annotator's checklist; the default one when the object does not carry it."""
+    if annotator is None or not hasattr(annotator, "action_vocabulary"):
+        return ACTION_VOCABULARY
+    return annotator.action_vocabulary
 
 
-def _normalise_actions(value: Any) -> tuple[list[str], list[str]]:
+def _normalise_actions(
+    value: Any, vocabulary: Sequence[str] | None = ACTION_VOCABULARY
+) -> tuple[list[str], list[str]]:
     """Split the model's actions into checklist phrases and anything else it wrote.
 
     A phrase is kept as a checklist action when, after trimming case and
@@ -1048,6 +1152,7 @@ def _normalise_actions(value: Any) -> tuple[list[str], list[str]]:
         value = [value]
     if not isinstance(value, (list, tuple)):
         return [], []
+    lookup = {action.lower(): action for action in (vocabulary or ())}
     known: list[str] = []
     other: list[str] = []
     for raw in value:
@@ -1056,10 +1161,10 @@ def _normalise_actions(value: Any) -> tuple[list[str], list[str]]:
         text = re.sub(r"\s+", " ", raw).strip().strip(".;,").strip().lower()
         if not text:
             continue
-        match = _ACTION_LOOKUP.get(text)
+        match = lookup.get(text)
         if match is None:
             match = next(
-                (action for phrase, action in _ACTION_LOOKUP.items() if phrase in text),
+                (action for phrase, action in lookup.items() if phrase in text),
                 None,
             )
         if match is None:
@@ -1113,8 +1218,16 @@ def _parse_event_list(content: str) -> list[Any]:
     return parsed
 
 
-def _clean_events(events: Sequence[Any]) -> list[Any]:
-    """Enforce the description rules on whatever the model actually returned."""
+def _clean_events(
+    events: Sequence[Any], vocabulary: Sequence[str] | None = ACTION_VOCABULARY
+) -> list[Any]:
+    """Enforce the description rules on whatever the model actually returned.
+
+    Exact duplicates (same event_name and description) are dropped: a model
+    asked for one event per action pads its answer by repeating the same
+    event, and a repeated event describes nothing new.
+    """
+    seen: set[tuple[str, str]] = set()
     cleaned: list[Any] = []
     for event in events:
         if not isinstance(event, dict):
@@ -1125,9 +1238,13 @@ def _clean_events(events: Sequence[Any]) -> list[Any]:
             if isinstance(item.get(key), str):
                 item[key] = _strip_track_ids(item[key])
         if "actions" in item:
-            item["actions"], other_actions = _normalise_actions(item["actions"])
+            item["actions"], other_actions = _normalise_actions(item["actions"], vocabulary)
             if other_actions:
                 item["other_actions"] = other_actions
+        key = (str(item.get("event_name", "")).strip(), str(item.get("description", "")).strip())
+        if key != ("", "") and key in seen:
+            continue
+        seen.add(key)
         objects = item.get("involved_objects")
         if isinstance(objects, list):
             item["involved_objects"] = [
