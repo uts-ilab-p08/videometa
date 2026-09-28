@@ -206,6 +206,37 @@ prose.
 
 To change the house style, edit `DESCRIPTION_GUIDANCE`; both annotators follow it.
 
+#### Actions, not just narration
+
+Left to itself, a video model answers "describe every activity" with one event
+per window about the most visible movement: *Person walks across the car park*.
+The door that was opened, the phone call and the reverse out of the bay in the
+same ten seconds never get a sentence, so any comparison against an activity
+taxonomy such as MEVA scores them as missed. `ACTION_GUIDANCE` therefore hands
+both annotators a checklist, `ACTION_VOCABULARY`, of plain-English actions
+(`opens a vehicle door`, `talks to another person`, `vehicle reverses`, ...),
+asks for one event per subject per action, and adds an `actions` list to every
+event. After the reply, checklist phrases are kept in `actions` (normalised to
+the vocabulary) and anything else the model wrote goes to `other_actions`.
+
+Two related guards: descriptions are asked for in two to four sentences and
+`physical_details` in one phrase, so the output budget goes to more events
+rather than longer ones, and a reply cut off by the token limit is salvaged
+(`_parse_event_list` keeps every complete event before the cut) instead of
+costing the whole window.
+
+#### Crop the video to the action
+
+`WindowSpatialFeatureJoiner(crop_to_activity=True)` writes the annotated MP4
+from the region holding the window's tracked people and vehicles, padded by
+`crop_padding` (20%), instead of shrinking the whole frame. On a 1080p camera
+resized to 640x360 a 200 px person becomes 70 px and a door or phone is no
+longer readable; the crop keeps them near full size for the same number of
+video tokens. When the region would exceed `crop_max_area` (60%) of the frame
+the full frame is used. The crop is recorded in `PreparedWindowInput.crop_box`
+and both prompts tell the model that the grid cells still refer to the full
+frame.
+
 ```python
 from videometa import EventExtractor, VideoAnnotator
 
