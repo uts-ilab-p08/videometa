@@ -2,6 +2,46 @@
 
 <!--next-version-placeholder-->
 
+## v0.0.19 (30/09/2026)
+
+The OpenCV motion gate is replaced by a VLM activity gate. **Breaking**:
+`MotionGateConfig`, `MotionSample` and `RelevantWindowFinder` are gone, and
+`RelevantWindow` has new fields.
+
+- `videometa.activity_gate`: the video is cut into fixed chunks
+  (`chunk_seconds=10`) that overlap their neighbour (`overlap_seconds=2`), so
+  each window carries the end of the previous one as context. Every chunk is
+  written as a small MP4 (`clip_size`, `clip_fps`) in one sequential pass and
+  shown to the same Qwen3-VL model that later writes the annotations, with a
+  rubric (`ACTIVITY_SCORE_GUIDANCE`) asking for a 0-1 activity score from the
+  number of moving subjects, how much they move, and how many distinct actions
+  or interactions occur. The score, the subjects, an event count and a
+  one-sentence summary are stored on every chunk.
+- `ActivityGateConfig.score_threshold` (default 0.3) decides which chunks go
+  on to tracking and annotation. The rubric places a lone person or vehicle
+  passing through at 0.1-0.2 and one subject doing one small thing (phone,
+  reading, carrying, sitting) at 0.3-0.4, so 0.3 keeps the subtle MEVA
+  activities while dropping empty scenes; 0.5 keeps only clear door,
+  vehicle-entry, meeting and manoeuvre chunks. `max_windows` and
+  `max_total_seconds` cap the selection, highest score first.
+- `ActivityWindowFinder(scorer, config, clip_directory=...)` exposes
+  `score_video()` (every chunk scored, none selected) and `build_windows()`
+  (threshold + budget) separately, so a threshold can be re-evaluated without
+  re-running the model. A chunk whose scoring call fails is kept with
+  `error` set and `score=0` instead of aborting the video.
+- `LocalQwenActivityScorer` wraps the MLX model for scoring;
+  `LocalQwenActivityScorer.from_annotator(annotator)` shares weights with a
+  `LocalQwenEventAnnotator`, which now also accepts `model=`/`processor=`.
+  `ActivityScorer` is a protocol, so any other VLM can be plugged in.
+- `videometa.local_qwen` holds the one MLX loading and video-generation path
+  both stages use (`load_local_qwen`, `generate_from_video`, `count_tokens`).
+- `RelevantWindow` is now `(start_seconds, end_seconds, start_frame,
+  end_frame, score, is_relevant, subjects, event_count, summary, clip_path,
+  error)`. `peak_motion`, `mean_motion`, `motion_metric`, `relevance`,
+  `focus`, `active_seconds` and `sample_count` are removed.
+- `VideoAnnotator` takes a required `window_finder` (any `WindowFinder`);
+  `probe_video()` replaces `RelevantWindowFinder.probe()`.
+
 ## v0.0.18 (28/09/2026)
 
 Follow-up to 0.0.17 after a pilot on one MEVA camera: the crop never engaged

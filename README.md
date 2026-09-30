@@ -2,8 +2,8 @@
 
 `videometa` turns a video into structured annotations in three independent stages:
 
-1. Find relevant, motion-based time windows.
-2. Track objects and extract their spatial boundaries.
+1. Cut the video into overlapping chunks and let a vision-language model score how much happens in each.
+2. Track objects and extract their spatial boundaries in the chunks that score high enough.
 3. Use a pluggable vision-language backend to identify events, descriptions, and involved objects.
 
 The package does not import OpenCV, Ultralytics, or a VLM at import time. Install and
@@ -13,6 +13,7 @@ configure only the integrations used by your application.
 
 ```bash
 pip install videometa opencv-python ultralytics
+pip install mlx-vlm          # Apple silicon, for the local Qwen3-VL gate and annotator
 ```
 
 ## Usage
@@ -20,94 +21,77 @@ pip install videometa opencv-python ultralytics
 ### Find relevant windows
 
 ```python
-from videometa import MotionGateConfig, RelevantWindowFinder
+from videometa import ActivityGateConfig, ActivityWindowFinder, LocalQwenActivityScorer
 
-finder = RelevantWindowFinder(MotionGateConfig())      # sensible defaults
+scorer = LocalQwenActivityScorer("mlx-community/Qwen3-VL-8B-Instruct-4bit")
+finder = ActivityWindowFinder(scorer, ActivityGateConfig(), clip_directory="clips")
 video, windows = finder.find("camera.mp4")
 relevant_windows = [window for window in windows if window.is_relevant]
 ```
 
-The gate makes three decisions, each configurable.
+The gate does three things.
 
-**1. What counts as motion — `motion_metric`.**
+**1. Cut the video into fixed, overlapping chunks.** `chunk_seconds` (10) and
+`overlap_seconds` (2) give chunks starting every 8 s: `0-10, 8-18, 16-26, ...`.
+Each chunk begins with the last two seconds of the previous one, so an action
+that straddles a boundary is whole in at least one chunk and the model sees
+what led into the window. Every chunk is written as a small MP4 (`clip_size`
+640x360, `clip_fps` 2, so 20 frames for 10 s) in a single pass over the source.
 
-| metric | what it measures | use it when |
-|---|---|---|
-| `"score"` | fraction of the whole frame flagged as foreground | you need the pre-0.1 behaviour |
-| `"tile_peak"` | the loudest cell of `tile_grid` | objects are small but the camera is static and clean |
-| `"blob_area"` | pixels in the largest connected region | you care about one coherent object, not scattered change |
-| `"local"` *(default)* | the loudest cell **against that cell's own history** | mixed scenes, where a distant figure and a passing lorry must both register |
+**2. Ask the VLM how much happens in each chunk.** The same Qwen3-VL model that
+later writes the event annotations is shown the clip with a rubric
+(`ACTIVITY_SCORE_GUIDANCE`) and returns a 0-1 `score` judged on how many people
+and vehicles move, how much they move, and how many distinct actions or
+interactions occur, plus `subjects`, an `event_count` and a one-sentence
+`summary`. All four are stored on the `RelevantWindow`, so a reviewer can see
+why a chunk was kept or dropped. The rubric's bands:
 
-`"score"` averages over the whole frame, so a 20x20 object on a 640x360 gate is
-0.17% of it and sits below any threshold that also rejects noise. `"local"`
-divides each cell's activity by that cell's own spread, so motion is scored
-against what is normal *there* — which is what lets a small, distant, or
-peripheral event clear the same bar as a large central one.
+| score | what the model sees |
+|---|---|
+| 0.0 | nothing moves: empty scene, parked cars, foliage, flicker |
+| 0.1-0.2 | one person or vehicle passes through, nothing else |
+| 0.3-0.4 | one subject does one small thing (phone, reading, carrying, sits/stands), or two subjects move independently |
+| 0.5-0.6 | a clear action or interaction: door/trunk, gets in/out, loads, two people meet or talk, vehicle stops/reverses/turns/picks up |
+| 0.7-0.8 | several such actions or several interacting subjects |
+| 0.9-1.0 | a busy scene with many simultaneous actions |
 
-Every sample is measured from two fused detectors: MOG2, and frame differencing
-to cover MOG2's blind spot (it absorbs a stationary object into its background
-within roughly `mog_history`/10 samples).
+A pixel-motion gate cannot tell a person opening a car door from a tree in the
+wind, and scores a bus in the foreground far above a distant figure texting.
+The model is asked about subjects and actions, which is what the annotation
+stage is looking for, and told not to let size decide the score.
 
-**2. Where the windows are cut — `segmentation`.**
-
-`"events"` (default) grows each window around a run of motion: a run opens at
-the threshold, stays open while it holds above `hysteresis_ratio` of it, and is
-then padded by `pad_seconds`, merged with neighbours closer than
-`merge_gap_seconds`, widened to `min_window_seconds` and split at
-`max_window_seconds`. Short events are widened, never dropped.
-
-`"grid"` restores the original fixed `window_seconds`/`stride_seconds` tiling,
-which is the only mode that supports `motion_std_direction` for finding
-unusually *still* windows.
-
-**3. Which windows survive — the threshold and the budget.**
-
-`motion_threshold` accepts a fixed number or a statistic name computed from that
-video's own samples (warmup samples excluded):
-
-- `"auto"` *(default)* — `median + motion_std_k * MAD`, held above a physical
-  floor for the chosen metric so a still video cannot calibrate its way down
-  into sensor noise.
-- `"mad"` — the same robust statistic with no floor.
-- `"std"` — `mean ± motion_std_k * std`. A standard deviation is inflated by the
-  few very loud samples every motion trace contains, which can push the cut
-  above every quiet event in a video that also holds one lorry; prefer `"mad"`.
-- `"avg"` / `"median"` — the plain statistic.
-
-Set `max_windows` or `max_total_seconds` to cap what the next stage has to read.
-Windows are ranked by peak, not total, so a brief intense event is not outranked
-by a long tepid one; every window is still returned, with `is_relevant` marking
-the selection. `spatial_diversity=True` spreads the budget across regions of the
-frame before spending it twice on the busiest one — useful when one area
-dominates the motion statistics, wasteful when it does not.
+**3. Keep the chunks at or above `score_threshold`.** The default 0.3 keeps
+everything beyond a lone subject passing through. That is deliberate for MEVA:
+its taxonomy has no "walks" or "drives" activity, but does include
+`person_texts_on_phone`, `person_reads_document`, `person_heavy_carry` and
+`person_sits_down`, which the rubric places at 0.3-0.4, so a 0.5 cut would drop
+them along with the empty car parks. Raise it to 0.5 to keep only chunks with
+a clear door, vehicle-entry, meeting or manoeuvre. `max_windows` and
+`max_total_seconds` then cap the selection, highest score first. Every chunk is
+still returned with `is_relevant` marking the selection, and a chunk whose
+scoring call failed is kept with `error` set and `score=0`.
 
 ```python
-MotionGateConfig(
-    motion_metric="local",
-    segmentation="events",
-    motion_threshold="auto",
-    pad_seconds=2.0,          # context around each event; the main cost dial
-    max_total_seconds=120,    # optional cap on what reaches the next stage
+ActivityGateConfig(
+    chunk_seconds=10.0,
+    overlap_seconds=2.0,
+    score_threshold=0.3,      # 0.5 for clear actions only
+    clip_size=(640, 360),
+    clip_fps=2.0,             # must match LocalQwenActivityScorer(video_fps=...)
+    max_total_seconds=None,   # optional cap on what reaches the next stage
 )
 ```
 
-A gate can only keep less than the events themselves occupy by dropping some. On
-a 5-minute MEVA clip whose 24 labelled events plus 2s padding occupy 38% of the
-running time, the defaults keep 53% with every event caught, against 87-100% for
-the fixed-grid gate.
+Use `finder.score_video(path)` once to get every chunk scored, then
+`finder.build_windows(scored)` under different `ActivityGateConfig` thresholds
+to compare cuts without running the model again.
 
-When `sample_fps` is omitted (the default), every video frame is evaluated: its value
-is automatically set to the source video FPS. Set `sample_fps=2` or another positive
-value only when you deliberately want to sample less frequently.
-
-Use `finder.sample_motion()` once, then `finder.calibrate(samples, thresholds)` to
-compare threshold values without decoding the source video again.
-`finder.resolve_motion_thresholds(samples)` returns the active lower and upper bounds.
-
-Because `"local"` scores motion against each cell's own history, it finds what is
-*unusual for this video*. On footage that is busy from start to finish, the
-baseline rises to meet it — use `"tile_peak"` or `"score"` with an absolute
-threshold there.
+`ActivityScorer` is a protocol: anything with
+`score(clip_path, start_seconds, end_seconds) -> {"score", "subjects",
+"event_count", "summary"}` can stand in for the local model, and
+`parse_activity_score()` turns a model's raw reply into that shape.
+`LocalQwenActivityScorer.from_annotator(annotator)` shares weights with a
+`LocalQwenEventAnnotator` in the same process instead of loading them twice.
 
 ### Extract spatial object boundaries
 
@@ -260,7 +244,7 @@ class MyEventBackend:
             }],
         }]
 
-annotator = VideoAnnotator(event_extractor=EventExtractor(MyEventBackend()))
+annotator = VideoAnnotator(finder, event_extractor=EventExtractor(MyEventBackend()))
 annotations = annotator.annotate("camera.mp4", include_events=True)
 document = annotations.to_dict()  # JSON-serializable
 ```
