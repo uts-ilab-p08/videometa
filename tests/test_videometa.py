@@ -1,180 +1,249 @@
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from videometa import (
+    ActivityGateConfig,
+    ActivityWindowFinder,
     BoundingBox,
     DetectionConfig,
     EventExtractor,
-    MotionGateConfig,
-    MotionSample,
     FrameAnnotations,
     ObjectBoundaryExtractor,
     ObjectDetection,
     ObjectWindowAnnotations,
     RelevantWindow,
-    RelevantWindowFinder,
     TrackedObject,
     PreparedWindowInput,
+    VideoInfo,
     WindowSpatialFeatureJoiner,
+    chunk_spans,
     describe_spatial_position,
+    parse_activity_score,
     resolve_video_source,
+    write_chunk_clips,
 )
 from videometa.window_annotation import _sample_frame_features
 
 
-def legacy_config(**overrides: object) -> MotionGateConfig:
-    """The fixed-grid, frame-mean gate that shipped before event segmentation."""
-    return MotionGateConfig(segmentation="grid", motion_metric="score", **overrides)  # type: ignore[arg-type]
+class FakeScorer:
+    """Scores chunks from a table keyed on their start second."""
+
+    def __init__(self, scores: dict[float, float], fail_at: float | None = None) -> None:
+        self.scores = scores
+        self.fail_at = fail_at
+        self.calls: list[tuple[str, float, float]] = []
+
+    def score(self, clip_path, start_seconds, end_seconds):
+        self.calls.append((clip_path, start_seconds, end_seconds))
+        if self.fail_at == start_seconds:
+            raise RuntimeError("model blew up")
+        return {
+            "score": self.scores.get(start_seconds, 0.0),
+            "subjects": ["person in a dark jacket"],
+            "event_count": 1,
+            "summary": "A person walks to a car.",
+        }
 
 
-def test_window_builder_uses_peak_motion_and_overlap() -> None:
-    finder = RelevantWindowFinder(
-        legacy_config(
-            window_seconds=5,
-            stride_seconds=4,
-            motion_threshold=0.1,
-        )
+def scored_windows(scores: dict[float, float], duration: float = 30.0):
+    """Chunks of a `duration` s video carrying `scores`, keyed on their start second."""
+    return [
+        RelevantWindow(start, end, round(start * 30), round(end * 30), scores[start], False)
+        for start, end in chunk_spans(duration, 10.0, 2.0)
+    ]
+
+
+# ---------------------------------------------------------------- activity gate
+
+
+def test_chunks_are_ten_seconds_with_two_seconds_of_overlap() -> None:
+    assert chunk_spans(30.0, 10.0, 2.0) == [(0.0, 10.0), (8.0, 18.0), (16.0, 26.0), (24.0, 30.0)]
+    # the tail is shortened, never padded past the end
+    assert chunk_spans(21.0, 10.0, 2.0) == [(0.0, 10.0), (8.0, 18.0), (16.0, 21.0)]
+    # a span that would only repeat the overlap is not started
+    assert chunk_spans(18.0, 10.0, 2.0) == [(0.0, 10.0), (8.0, 18.0)]
+    assert chunk_spans(19.0, 10.0, 2.0) == [(0.0, 10.0), (8.0, 18.0), (16.0, 19.0)]
+    # short videos are one chunk; nothing is one span of nothing
+    assert chunk_spans(7.0, 10.0, 2.0) == [(0.0, 7.0)]
+    assert chunk_spans(0.0, 10.0, 2.0) == []
+    assert chunk_spans(20.0, 10.0, 0.0) == [(0.0, 10.0), (10.0, 20.0)]
+
+
+def test_gate_config_validates_its_parameters() -> None:
+    config = ActivityGateConfig()
+    assert (config.chunk_seconds, config.overlap_seconds, config.stride_seconds) == (10.0, 2.0, 8.0)
+    assert config.score_threshold == 0.3
+    for kwargs in (
+        {"chunk_seconds": 0},
+        {"overlap_seconds": 10.0},
+        {"overlap_seconds": -1.0},
+        {"score_threshold": 1.5},
+        {"clip_fps": 0},
+        {"clip_size": (0, 360)},
+        {"max_windows": -1},
+    ):
+        with pytest.raises(ValueError):
+            ActivityGateConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def test_activity_score_is_parsed_from_fenced_partial_or_bare_replies() -> None:
+    clean = parse_activity_score(
+        '{"score": 0.55, "subjects": ["white SUV", " person "], "event_count": 2, '
+        '"summary": "A person gets into a white SUV."}'
     )
-    samples = [
-        MotionSample(frame_index=index * 30, timestamp_seconds=float(index * 2), score=score)
-        for index, score in enumerate((0.01, 0.02, 0.3, 0.01, 0.02, 0.01))
+    assert clean == {
+        "score": 0.55,
+        "subjects": ["white SUV", "person"],
+        "event_count": 2,
+        "summary": "A person gets into a white SUV.",
+    }
+    fenced = parse_activity_score('```json\n{"score": 0.2, "subjects": [], "event_count": 0}\n```')
+    assert (fenced["score"], fenced["summary"]) == (0.2, "")
+    prose = parse_activity_score('Sure, here is the rating: {"score": 0.7, "event_count": 3}. Done.')
+    assert (prose["score"], prose["event_count"]) == (0.7, 3)
+    # cut off mid-string: the score is still recovered
+    cut = parse_activity_score('{"score": 0.4, "subjects": ["person in a red')
+    assert cut["score"] == 0.4 and cut["subjects"] == []
+    # out-of-range and odd types are clamped or tolerated
+    assert parse_activity_score('{"score": 1.4}')["score"] == 1.0
+    assert parse_activity_score('{"score": "0.3", "subjects": "a car", "event_count": "x"}') == {
+        "score": 0.3, "subjects": ["a car"], "event_count": 0, "summary": "",
+    }
+    with pytest.raises(ValueError):
+        parse_activity_score("I cannot rate this video.")
+    with pytest.raises(ValueError):
+        parse_activity_score('{"score": "high"}')
+
+
+def test_threshold_keeps_chunks_at_or_above_it_and_marks_the_rest() -> None:
+    scored = scored_windows({0.0: 0.0, 8.0: 0.3, 16.0: 0.6, 24.0: 0.29})
+    finder = ActivityWindowFinder(FakeScorer({}), ActivityGateConfig(score_threshold=0.3))
+
+    windows = finder.build_windows(scored)
+
+    assert [window.is_relevant for window in windows] == [False, True, True, False]
+    # nothing is thrown away, so the rejected chunks and their scores stay visible
+    assert [window.score for window in windows] == [0.0, 0.3, 0.6, 0.29]
+    assert [window.start_seconds for window in windows] == [0.0, 8.0, 16.0, 24.0]
+
+
+def test_budget_is_spent_highest_score_first() -> None:
+    scored = scored_windows({0.0: 0.5, 8.0: 0.9, 16.0: 0.7, 24.0: 0.6})
+    by_count = ActivityWindowFinder(FakeScorer({}), ActivityGateConfig(max_windows=2))
+    by_seconds = ActivityWindowFinder(FakeScorer({}), ActivityGateConfig(max_total_seconds=26.0))
+
+    assert [w.is_relevant for w in by_count.build_windows(scored)] == [False, True, True, False]
+    # 26 s buys the two best 10 s chunks; the 0.6 tail (24-30 s, 6 s) still fits, the 0.5 one does not
+    assert [w.is_relevant for w in by_seconds.build_windows(scored)] == [False, True, True, True]
+
+
+def test_a_failed_chunk_is_recorded_and_never_relevant() -> None:
+    scored = scored_windows({0.0: 0.9, 8.0: 0.9}, duration=18.0)
+    scored[0] = replace(scored[0], error="model blew up", score=0.0)
+    windows = ActivityWindowFinder(FakeScorer({})).build_windows(scored)
+
+    assert [w.is_relevant for w in windows] == [False, True]
+    assert windows[0].error == "model blew up"
+
+
+def synthetic_video(path: Path, seconds: float = 21.0, fps: float = 30.0) -> VideoInfo:
+    """A tiny MP4 whose frame brightness encodes the frame index."""
+    import cv2
+    import numpy as np
+
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (64, 36))
+    count = int(seconds * fps)
+    for index in range(count):
+        frame = np.full((36, 64, 3), (index * 255 // count), dtype=np.uint8)
+        writer.write(frame)
+    writer.release()
+    return VideoInfo(str(path), fps, count, 64, 36)
+
+
+def test_chunk_clips_are_written_in_one_pass_at_the_clip_frame_rate(tmp_path: Path) -> None:
+    import cv2
+
+    info = synthetic_video(tmp_path / "source.mp4")
+    spans = chunk_spans(info.duration_seconds, 10.0, 2.0)
+
+    clips = write_chunk_clips(info, spans, tmp_path / "clips", clip_size=(32, 18), clip_fps=2.0)
+
+    assert [clip.name for clip in clips] == [
+        "chunk_0.000s_10.000s.mp4", "chunk_8.000s_18.000s.mp4", "chunk_16.000s_21.000s.mp4",
     ]
+    lengths = []
+    for clip in clips:
+        capture = cv2.VideoCapture(str(clip))
+        assert capture.isOpened()
+        assert int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)) == 32
+        frames = 0
+        while capture.read()[0]:
+            frames += 1
+        capture.release()
+        lengths.append(frames)
+    # 10 s at 2 FPS is 20 frames (21 with the end frame), the 5 s tail about 10
+    assert lengths[0] >= 20 and lengths[1] >= 20 and 10 <= lengths[2] <= 12
 
-    windows = finder.build_windows(samples, duration_seconds=11)
 
-    assert [(window.start_seconds, window.end_seconds) for window in windows] == [
-        (0.0, 5.0),
-        (4.0, 9.0),
-        (8.0, 11),
+def test_finder_scores_every_chunk_keeps_the_active_ones_and_survives_a_failure(tmp_path: Path) -> None:
+    info = synthetic_video(tmp_path / "source.mp4")
+    scorer = FakeScorer({0.0: 0.1, 8.0: 0.6, 16.0: 0.4}, fail_at=16.0)
+    finder = ActivityWindowFinder(
+        scorer, ActivityGateConfig(score_threshold=0.3, clip_size=(32, 18)),
+        clip_directory=tmp_path / "clips",
+    )
+
+    video, windows = finder.find(info.path)
+
+    assert video.frame_count == info.frame_count
+    assert [(w.start_seconds, w.end_seconds) for w in windows] == [(0.0, 10.0), (8.0, 18.0), (16.0, 21.0)]
+    assert [w.score for w in windows] == [0.1, 0.6, 0.0]
+    assert [w.is_relevant for w in windows] == [False, True, False]
+    assert windows[1].subjects == ("person in a dark jacket",)
+    assert windows[1].event_count == 1 and windows[1].summary.startswith("A person")
+    assert windows[2].error == "model blew up"
+    # frame ranges line up with the source so the tracker assigns frames correctly
+    assert (windows[1].start_frame, windows[1].end_frame) == (240, 540)
+    assert windows[2].end_frame == info.frame_count - 1
+    # every chunk was shown to the model from its own clip file
+    assert [Path(call[0]).name for call in scorer.calls] == [
+        "chunk_0.000s_10.000s.mp4", "chunk_8.000s_18.000s.mp4", "chunk_16.000s_21.000s.mp4",
     ]
-    assert [window.is_relevant for window in windows] == [True, True, False]
-    assert windows[0].peak_motion == 0.3
+    assert all(Path(w.clip_path).is_file() for w in windows)
+    assert Path(windows[0].clip_path).parent == tmp_path / "clips" / "source"
 
 
-def test_motion_sampling_uses_source_fps_by_default() -> None:
-    assert MotionGateConfig().sample_fps is None
-    assert MotionGateConfig(sample_fps=2).sample_fps == 2
+def test_activity_prompt_carries_the_rubric_and_asks_for_json_only() -> None:
+    from videometa import ACTIVITY_SCORE_GUIDANCE, build_activity_prompt
+
+    prompt = build_activity_prompt(8.0, 18.0, 2.0)
+
+    assert ACTIVITY_SCORE_GUIDANCE in prompt
+    assert "8.0s to 18.0s" in prompt and "2 frames per second" in prompt
+    assert "Return JSON only" in prompt
+    assert '"score"' in prompt and '"subjects"' in prompt and '"event_count"' in prompt
+    # the MEVA actions the gate must not score away are named in the rubric
+    for phrase in ("talks on a phone", "trunk opens or closes", "gets into or out of a vehicle",
+                   "reverses", "distant person"):
+        assert phrase in prompt
+
+
+def test_scorer_constructor_needs_model_and_processor_together() -> None:
+    from videometa import LocalQwenActivityScorer
+
+    with pytest.raises(ValueError):
+        LocalQwenActivityScorer(model=object())
+
+
+# ---------------------------------------------------------------- shared
 
 
 def test_resolve_video_source_accepts_local_paths() -> None:
     video = Path(__file__).with_name("2018-03-05.13-15-00.13-20-00.bus.G340.r13.avi")
 
     assert resolve_video_source(video) == video
-
-
-def test_calibration_does_not_mutate_finder_configuration() -> None:
-    finder = RelevantWindowFinder(legacy_config(motion_threshold=0.2))
-    samples = [MotionSample(0, 0.0, 0.3), MotionSample(1, 1.0, 0.1)]
-
-    results = finder.calibrate(samples, thresholds=(0.05, 0.4))
-
-    assert results[0.05][0].is_relevant
-    assert not results[0.4][0].is_relevant
-    assert finder.config.motion_threshold == 0.2
-
-
-def test_motion_threshold_avg_uses_sample_mean() -> None:
-    finder = RelevantWindowFinder(
-        legacy_config(window_seconds=5, stride_seconds=5, motion_threshold="avg")
-    )
-    samples = [
-        MotionSample(0, 0.0, 0.1),
-        MotionSample(1, 1.0, 0.3),
-        MotionSample(2, 2.0, 0.2),
-    ]
-
-    threshold = finder.resolve_motion_threshold(samples)
-    windows = finder.build_windows(samples, duration_seconds=5)
-
-    assert threshold == 0.2
-    assert windows[0].is_relevant
-    assert finder.config.motion_threshold == "avg"
-
-
-def test_motion_threshold_median_uses_sample_median() -> None:
-    finder = RelevantWindowFinder(
-        legacy_config(window_seconds=5, stride_seconds=5, motion_threshold="median")
-    )
-    samples = [
-        MotionSample(0, 0.0, 0.1),
-        MotionSample(1, 1.0, 0.9),
-        MotionSample(2, 2.0, 0.2),
-    ]
-
-    windows = finder.build_windows(samples, duration_seconds=5)
-
-    assert finder.resolve_motion_threshold(samples) == 0.2
-    assert windows[0].is_relevant
-
-
-def test_motion_threshold_std_uses_mean_plus_scaled_stdev() -> None:
-    finder = RelevantWindowFinder(
-        legacy_config(window_seconds=5, stride_seconds=5, motion_threshold="std")
-    )
-    samples = [
-        MotionSample(0, 0.0, 0.1),
-        MotionSample(1, 1.0, 0.2),
-        MotionSample(2, 2.0, 0.3),
-    ]
-
-    threshold = finder.resolve_motion_threshold(samples)
-    windows = finder.build_windows(samples, duration_seconds=5)
-
-    assert threshold == 0.35
-    assert not windows[0].is_relevant
-
-
-def test_motion_threshold_std_can_select_lower_or_both_bounds() -> None:
-    samples = [
-        MotionSample(0, 0.0, 0.1),
-        MotionSample(1, 1.0, 0.1),
-        MotionSample(2, 2.0, 0.9),
-        MotionSample(3, 3.0, 0.9),
-    ]
-    lower_finder = RelevantWindowFinder(
-        legacy_config(
-            window_seconds=2,
-            stride_seconds=2,
-            motion_threshold="std",
-            motion_std_k=0.5,
-            motion_std_direction="lower",
-        )
-    )
-    both_finder = RelevantWindowFinder(
-        legacy_config(
-            window_seconds=2,
-            stride_seconds=2,
-            motion_threshold="std",
-            motion_std_k=0.5,
-            motion_std_direction="both",
-        )
-    )
-
-    lower_threshold, upper_threshold = lower_finder.resolve_motion_thresholds(samples)
-    assert round(lower_threshold or 0.0, 6) == 0.26906
-    assert upper_threshold is None
-    assert [window.is_relevant for window in lower_finder.build_windows(samples, 4)] == [True, False]
-    assert [window.is_relevant for window in both_finder.build_windows(samples, 4)] == [True, True]
-
-
-def test_motion_threshold_rejects_unknown_std_direction() -> None:
-    try:
-        MotionGateConfig(motion_threshold="std", motion_std_direction="sideways")
-    except ValueError as error:
-        assert "upper" in str(error)
-    else:
-        raise AssertionError("expected ValueError for unknown motion_std_direction")
-
-
-def test_motion_threshold_rejects_unknown_statistic() -> None:
-    try:
-        MotionGateConfig(motion_threshold="p90")
-    except ValueError as error:
-        assert "avg" in str(error)
-        assert "median" in str(error)
-        assert "std" in str(error)
-    else:
-        raise AssertionError("expected ValueError for unknown motion_threshold")
 
 
 def test_detection_config_defaults_to_all_yolo_classes() -> None:
@@ -249,7 +318,7 @@ def test_event_extractor_normalizes_backend_event_shape() -> None:
                 }
             ]
 
-    window = RelevantWindow(0, 5, 0, 149, 3, 0.5, 0.2, True)
+    window = RelevantWindow(0, 5, 0, 149, 0.5, True)
     tracked = TrackedObject(7, "car", 0, 149, 0, 4.9, 0.9, ("middle-left",))
     annotations = ObjectWindowAnnotations(window, (tracked,), ())
 
@@ -267,230 +336,15 @@ def test_joiner_defaults_to_qwen_safe_video_shape() -> None:
 
 
 def test_qwen_frame_features_are_sampled() -> None:
-    frames = [{"frame_index": index} for index in range(150)]
+    frames = [
+        {"frame_index": index, "timestamp_seconds": index / 30, "detections": []}
+        for index in range(150)
+    ]
 
     sampled = _sample_frame_features(frames, max_frames=12)
 
     assert len(sampled) == 12
-    assert sampled[0]["frame_index"] == 0
-
-
-def motion_samples(values: list[float], fps: float = 30.0, sample_fps: float = 10.0,
-                   focus: tuple[int, int] | None = (4, 8)) -> list[MotionSample]:
-    """Samples carrying `values` as the local score, spaced at `sample_fps`."""
-    step = int(round(fps / sample_fps))
-    return [
-        MotionSample(
-            frame_index=index * step,
-            timestamp_seconds=index * step / fps,
-            score=0.001,
-            local_score=value,
-            focus=focus,
-            is_warmup=index < 2,
-        )
-        for index, value in enumerate(values)
-    ]
-
-
-def test_event_windows_hug_the_motion_instead_of_a_fixed_grid() -> None:
-    # 40s of quiet with a 1s burst at 20s: the old grid returned a 60s window,
-    # the event gate should return something the length of the burst plus padding.
-    values = [0.0] * 400
-    for index in range(200, 210):
-        values[index] = 50.0
-    finder = RelevantWindowFinder(
-        MotionGateConfig(motion_threshold=5.0, pad_seconds=2.0, min_window_seconds=2.0)
-    )
-
-    windows = finder.build_windows(motion_samples(values), duration_seconds=40.0)
-
-    assert len(windows) == 1
-    window = windows[0]
-    assert window.is_relevant
-    assert (window.start_seconds, window.end_seconds) == (18.0, 23.0)
-    assert window.peak_motion == 50.0
-    assert round(window.active_seconds, 1) == 1.0
-    assert window.motion_metric == "local"
-
-
-def test_hysteresis_keeps_one_quiet_sample_from_splitting_an_event() -> None:
-    values = [0.0] * 200
-    for index in range(100, 120):
-        values[index] = 40.0
-    values[110] = 12.0  # a dip that clears the threshold but not the hysteresis floor
-    finder = RelevantWindowFinder(
-        MotionGateConfig(motion_threshold=20.0, hysteresis_ratio=0.5, pad_seconds=0.0,
-                         merge_gap_seconds=0.0, min_window_seconds=0.0)
-    )
-
-    windows = finder.build_windows(motion_samples(values), duration_seconds=20.0)
-
-    assert len(windows) == 1
-    assert (windows[0].start_seconds, windows[0].end_seconds) == (10.0, 12.0)
-
-
-def test_short_events_are_widened_and_long_ones_are_split() -> None:
-    values = [0.0] * 600
-    for index in range(100, 103):
-        values[index] = 50.0                # a 0.3s event
-    for index in range(300, 500):
-        values[index] = 50.0                # a 20s block
-    finder = RelevantWindowFinder(
-        MotionGateConfig(motion_threshold=5.0, pad_seconds=0.0, merge_gap_seconds=0.0,
-                         min_window_seconds=4.0, max_window_seconds=8.0)
-    )
-
-    windows = finder.build_windows(motion_samples(values), duration_seconds=60.0)
-
-    durations = [round(window.duration_seconds, 3) for window in windows]
-    assert durations[0] == 4.0              # widened from 0.3s, not dropped
-    assert all(duration <= 8.0 for duration in durations)
-    assert round(sum(durations[1:]), 1) == 20.0
-
-
-def test_a_single_sample_spike_is_treated_as_noise() -> None:
-    values = [0.0] * 600
-    values[100] = 50.0                      # one sample, with quiet on both sides
-    finder = RelevantWindowFinder(
-        MotionGateConfig(motion_threshold=5.0, smooth_samples=3, min_window_seconds=0.0)
-    )
-
-    assert finder.build_windows(motion_samples(values), duration_seconds=60.0) == []
-    # ...unless the caller turns the median filter off
-    unsmoothed = RelevantWindowFinder(
-        MotionGateConfig(motion_threshold=5.0, smooth_samples=1, min_window_seconds=0.0)
-    )
-    assert len(unsmoothed.build_windows(motion_samples(values), duration_seconds=60.0)) == 1
-
-
-def test_windows_are_ranked_by_peak_and_capped_by_budget() -> None:
-    values = [0.0] * 600
-    for index in range(100, 120):
-        values[index] = 10.0                # quieter, earlier
-    for index in range(300, 320):
-        values[index] = 90.0                # louder, later
-    finder = RelevantWindowFinder(
-        MotionGateConfig(motion_threshold=5.0, pad_seconds=0.0, merge_gap_seconds=0.0,
-                         min_window_seconds=0.0, max_windows=1)
-    )
-
-    windows = finder.build_windows(motion_samples(values), duration_seconds=60.0)
-
-    assert [window.is_relevant for window in windows] == [False, True]
-    assert windows[1].peak_motion == 90.0
-    # nothing is thrown away, so a caller can still see what was rejected
-    assert windows[0].peak_motion == 10.0
-
-
-def test_spatial_diversity_spends_the_budget_across_regions() -> None:
-    quiet_corner = motion_samples([0.0] * 300, focus=(0, 15))
-    for index in range(100, 120):
-        quiet_corner[index] = replace(quiet_corner[index], local_score=20.0)
-    busy_centre = motion_samples([0.0] * 300, focus=(4, 8))
-    for index in range(200, 220):
-        busy_centre[index] = replace(busy_centre[index], local_score=90.0)
-    merged = [
-        corner if corner.local_score >= centre.local_score else centre
-        for corner, centre in zip(quiet_corner, busy_centre)
-    ]
-    # a second, even louder burst in the busy centre
-    for index in range(250, 270):
-        merged[index] = replace(merged[index], local_score=95.0, focus=(4, 8))
-
-    def relevant_focuses(diversity: bool) -> list[tuple[int, int] | None]:
-        finder = RelevantWindowFinder(
-            MotionGateConfig(motion_threshold=5.0, pad_seconds=0.0, merge_gap_seconds=0.0,
-                             min_window_seconds=0.0, max_windows=2,
-                             spatial_diversity=diversity)
-        )
-        return [w.focus for w in finder.build_windows(merged, 30.0) if w.is_relevant]
-
-    assert relevant_focuses(False) == [(4, 8), (4, 8)]     # both go to the loudest region
-    assert sorted(relevant_focuses(True)) == [(0, 15), (4, 8)]
-
-
-def test_a_still_video_produces_no_windows() -> None:
-    finder = RelevantWindowFinder(MotionGateConfig())          # motion_threshold="auto"
-
-    assert finder.build_windows(motion_samples([0.0] * 300), duration_seconds=30.0) == []
-
-
-def test_auto_threshold_never_falls_below_the_metric_floor() -> None:
-    # A video of pure noise must not calibrate its way down into that noise.
-    noise = [0.1, 0.2, 0.15, 0.05, 0.2, 0.1] * 20
-    config = MotionGateConfig(motion_metric="local")
-
-    assert config.resolve_threshold(noise) == config.metric_floor() == 3.0
-
-
-def test_mad_threshold_is_not_dragged_up_by_one_loud_sample() -> None:
-    samples = [0.1] * 20 + [50.0]
-    quiet = MotionGateConfig(motion_metric="score", motion_threshold="mad", motion_std_k=1.5)
-    fragile = MotionGateConfig(motion_metric="score", motion_threshold="std", motion_std_k=1.5)
-
-    assert quiet.resolve_threshold(samples) == 0.1          # median + 1.5 * 0 MAD
-    assert fragile.resolve_threshold(samples) > 18.0        # mean + 1.5 * a huge stdev
-
-
-def test_warmup_samples_are_excluded_from_the_threshold() -> None:
-    values = [0.0] * 50 + [30.0] * 50
-    finder = RelevantWindowFinder(MotionGateConfig(motion_threshold="median", pad_seconds=0.0,
-                                                   min_window_seconds=0.0))
-    samples = [
-        replace(sample, is_warmup=index < 50)
-        for index, sample in enumerate(motion_samples(values))
-    ]
-
-    # with warmup zeros counted the median would be 0 and everything would flag;
-    # ignoring them puts the cut at 30 and only the moving half survives
-    windows = finder.build_windows(samples, duration_seconds=10.0)
-    assert all(window.start_seconds >= 5.0 for window in windows)
-
-
-def test_motion_metric_selects_the_field_that_is_thresholded() -> None:
-    sample = MotionSample(0, 0.0, score=0.5, tile_peak=0.8, blob_area=120.0, local_score=9.0)
-
-    assert sample.metric("score") == 0.5
-    assert sample.metric("tile_peak") == 0.8
-    assert sample.metric("blob_area") == 120.0
-    assert sample.metric("local") == 9.0
-    try:
-        sample.metric("nope")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("expected ValueError for an unknown metric")
-
-
-def test_invalid_segmentation_parameters_are_rejected() -> None:
-    for kwargs in (
-        {"motion_metric": "loudness"},
-        {"segmentation": "sliding"},
-        {"hysteresis_ratio": 1.5},
-        {"smooth_samples": 0},
-        {"pad_seconds": -1.0},
-        {"min_window_seconds": 30.0, "max_window_seconds": 10.0},
-        {"tile_floor": 0.0},
-    ):
-        try:
-            MotionGateConfig(**kwargs)  # type: ignore[arg-type]
-        except ValueError:
-            continue
-        raise AssertionError(f"expected ValueError for {kwargs}")
-
-
-def test_reported_threshold_matches_the_metric_the_gate_cuts_on() -> None:
-    # the helper used to report a cutoff computed from `score` whatever the
-    # configured metric was, so a caller plotting it drew the wrong line
-    samples = [
-        MotionSample(index, index / 10, score=0.5, local_score=20.0)
-        for index in range(20)
-    ]
-    finder = RelevantWindowFinder(MotionGateConfig(motion_metric="local",
-                                                   motion_threshold="median"))
-
-    assert finder.resolve_motion_threshold(samples) == 20.0
-    assert finder.resolve_motion_thresholds(samples) == (None, 20.0)
+    assert sampled[0]["t"] == 0.0
 
 
 def track_profile(first, last, label="person", appearance=(1.0, 0.2, 0.05),

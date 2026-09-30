@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from videometa.annotation import ObjectWindowAnnotations, resolve_video_source
+from videometa.local_qwen import (
+    DEFAULT_MODEL_ID,
+    count_tokens,
+    generate_from_video,
+    load_local_qwen,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -484,8 +490,10 @@ class LocalQwenEventAnnotator:
 
     def __init__(
         self,
-        model_id: str = "mlx-community/Qwen3-VL-4B-Instruct-4bit",
+        model_id: str = DEFAULT_MODEL_ID,
         *,
+        model: Any | None = None,
+        processor: Any | None = None,
         video_fps: float = 2.0,
         max_tokens: int = 1200,
         prompt_token_budget: int = DEFAULT_PROMPT_TOKEN_BUDGET,
@@ -494,20 +502,22 @@ class LocalQwenEventAnnotator:
     ) -> None:
         """``action_vocabulary`` is the checklist the model is asked to name actions
         from (see `ACTION_VOCABULARY`); pass your dataset's own list, or None to
-        drop the checklist and let the model describe actions freely."""
-        try:
-            from mlx_vlm import load
-        except ImportError as error:
-            raise ImportError(
-                "Local Qwen annotation requires `pip install mlx-vlm`."
-            ) from error
-        self.model, self.processor = load(model_id)
+        drop the checklist and let the model describe actions freely.
+
+        Pass ``model`` and ``processor`` to reuse weights that are already
+        loaded, for instance by a `LocalQwenActivityScorer` in the same
+        process; otherwise ``model_id`` is loaded here."""
+        if (model is None) != (processor is None):
+            raise ValueError("pass both model and processor, or neither")
+        if model is None:
+            model, processor = load_local_qwen(model_id)
+        self.model = model
+        self.processor = processor
         self.video_fps = video_fps
         self.max_tokens = max_tokens
         self.prompt_token_budget = prompt_token_budget
         self.feature_frames = feature_frames
         self.action_vocabulary = tuple(action_vocabulary) if action_vocabulary else None
-        logger.info("Loaded local Qwen model: %s", model_id)
 
     def annotate(
         self, prepared_input: PreparedWindowInput | str | Path
@@ -609,47 +619,18 @@ class LocalQwenEventAnnotator:
         )
 
     def _count_tokens(self, prompt: str) -> int:
-        tokenizer = getattr(self.processor, "tokenizer", self.processor)
-        return len(tokenizer(prompt).input_ids)
+        return count_tokens(self.processor, prompt)
 
     def _generate_events(self, video_path: str, prompt: str) -> list[dict[str, Any]]:
         """Run local Qwen3-VL over a local video path and parse its JSON event list."""
-        try:
-            import mlx.core as mx
-            from mlx_vlm import generate
-        except ImportError as error:
-            raise ImportError(
-                "Local Qwen annotation requires `pip install mlx-vlm`."
-            ) from error
-
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "video", "video": video_path},
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ]
-        formatted_prompt = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+        output_text = generate_from_video(
+            self.model,
+            self.processor,
+            video_path,
+            prompt,
+            fps=self.video_fps,
+            max_tokens=self.max_tokens,
         )
-        try:
-            output = generate(
-                self.model,
-                self.processor,
-                formatted_prompt,
-                video=[video_path],
-                fps=self.video_fps,
-                max_tokens=self.max_tokens,
-                verbose=False,
-            )
-        finally:
-            # MLX pools freed Metal buffers. Across dozens of windows in one
-            # loop that pool grows until allocation fails, so release it after
-            # every call whether or not generation succeeded.
-            mx.clear_cache()
-        output_text = output.text if hasattr(output, "text") else str(output)
         parsed = _parse_event_list(output_text)
         logger.info("Local Qwen returned %d events for %s", len(parsed), video_path)
         return _clean_events(parsed, vocabulary=_vocabulary_of(self))
