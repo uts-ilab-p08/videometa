@@ -49,10 +49,11 @@ DESCRIPTION_GUIDANCE = (
     "or 'pale grey'), size relative to its surroundings ('a small child', "
     "'a full-size van'), shape or build, clothing, and anything carried, "
     "worn or towed.\n"
-    "  3. Movement, step by step: the path taken, direction of travel by "
-    "landmark, pace (standing, strolling, hurrying, creeping, accelerating, "
-    "braking), changes of pace or direction, stops and starts, and how far "
-    "the subject travels relative to the scene.\n"
+    "  3. Movement, step by step: the shape of the path (see the movement "
+    "rule below), direction of travel by landmark, pace (standing, "
+    "strolling, hurrying, creeping, accelerating, braking), changes of pace "
+    "or direction, stops and starts, and how far the subject travels "
+    "relative to the scene.\n"
     "  4. Interactions: who or what each subject approaches, follows, avoids, "
     "hands something to, opens, enters, exits, loads, waits for or passes, "
     "including relative position while doing so ('beside', 'behind', 'in "
@@ -79,6 +80,20 @@ DESCRIPTION_GUIDANCE = (
     "a parking bay and departs along the access road', never 'moves from top "
     "to bottom'. Use a compass bearing only where the scene establishes it "
     "with certainty.\n"
+    "- Movement rule: say what shape every movement takes, for vehicles and "
+    "people alike, and do not leave it at 'moves' or 'drives past' when the "
+    "path can be seen. Say whether the subject keeps straight on, turns left "
+    "or turns right, makes a U-turn, reverses, goes round in a circle or "
+    "loop, weaves or zigzags, walks back and forth, turns around, slows "
+    "down, speeds up, stops, pauses and sets off again, pulls into or out of "
+    "a parking bay, parks, or follows another subject. Left and right are "
+    "from the subject's own direction of travel, as its driver or the walker "
+    "would say it, not from the camera's point of view; when the two differ, "
+    "say which way the subject's front swings ('turns left, swinging its "
+    "nose towards the building'). A turn is a change of heading; a vehicle "
+    "that only crosses the frame on a curved road is keeping straight on. "
+    "Each of these that applies also belongs in the event's actions list "
+    "whenever a matching action phrase is available.\n"
     "- Report every observable activity involving a person or a vehicle, "
     "including ordinary movement such as someone walking through the scene or "
     "a vehicle driving past. Do not limit yourself to unusual or noteworthy "
@@ -87,6 +102,25 @@ DESCRIPTION_GUIDANCE = (
     "determined, stay general ('a dark hatchback') rather than speculate. If "
     "genuinely nothing moves in this window, return an empty list rather than "
     "inventing an event.\n"
+    "- One event, one set of subjects. The description covers only the "
+    "subjects listed in involved_objects: their appearance, movement, "
+    "interactions and end state. Anyone or anything else in the frame may be "
+    "named once as a location reference ('beside the parked silver car', "
+    "'past a person standing at the counter') but is never described or "
+    "given actions of its own. Something unrelated happening elsewhere in "
+    "the frame is a separate event, not part of this one.\n"
+    "- involved_objects and the description must point at the same subjects. "
+    "The subject performing the action is always listed, and so is every "
+    "other person or object directly part of the action: the person talked "
+    "to, handed to, hugged or walked with; the object carried, picked up, put "
+    "down or handed over; the vehicle entered, exited, loaded or driven. "
+    "Before finishing an event, check the overlay boxes one by one and list "
+    "every box that is directly part of it, people and objects alike. An "
+    "item that is part of the event but has no box is described in the text "
+    "and never given an invented id. Match each id to its subject by the "
+    "overlay box and label: when the description says 'a person in a dark "
+    "jacket walks toward the counter', the id is the box around that walker, "
+    "not the box around the person already standing at the counter.\n"
     "\n"
     "Acceptable:\n"
     "  event_name: 'Person loads a suitcase into a white SUV'\n"
@@ -98,7 +132,14 @@ DESCRIPTION_GUIDANCE = (
     "closed.'\n"
     "Not acceptable:\n"
     "  event_name: 'person_unloads_vehicle'\n"
-    "  description: 'car #201 moves from top-left to middle-left.'"
+    "  description: 'car #201 moves from top-left to middle-left.'\n"
+    "Not acceptable either (the description is about the walker, but the only "
+    "involved object is the person being approached):\n"
+    "  event_name: 'Person walks toward the counter'\n"
+    "  description: 'A person in a dark jacket walks from the right toward "
+    "the counter, where a person in a pink shirt is standing and sorting "
+    "cups.'\n"
+    "  involved_objects: [{id of the person in the pink shirt}]"
 )
 
 #: What `physical_details` should hold for each involved object.
@@ -107,6 +148,35 @@ PHYSICAL_DETAILS_GUIDANCE = (
     "(with shade), type, make or garment style, approximate size relative to "
     "the scene, and anything it carries, wears or tows. Movement and "
     "interactions belong in the description, not here."
+)
+
+#: The self-review the model runs on its draft before answering. Written as
+#: questions because a model told "be careful" is not more careful; a model
+#: told what to check, one event at a time, drops the events that fail.
+REVIEW_GUIDANCE = (
+    "Before you answer, review your draft critically, one event at a time, "
+    "thinking it through step by step. Do this silently: the output stays "
+    "JSON only. For each event ask:\n"
+    "  1. Did it actually happen? A viewer must be able to point to the frames "
+    "where it does. Drop anything inferred, guessed, or carried over from a "
+    "detector label rather than seen.\n"
+    "  2. Is it worth recording? A static background object, a box flickering "
+    "on a parked vehicle, or a subject that is merely visible without doing "
+    "anything is not an event.\n"
+    "  3. Does it make sense? The path must be physically possible, the "
+    "timing must fit inside the window, and the start state, the steps and "
+    "the end state must agree with each other.\n"
+    "  4. Is it the same scene as another event in the list? Two events that "
+    "retell the same subject's movement are one event with all of its "
+    "actions; merge them.\n"
+    "  5. Do the involved objects match the text? Every subject the "
+    "description is about is listed by its own box, nothing is listed that "
+    "the description does not involve, and no id is invented.\n"
+    "  6. Is every listed action visible in the frames and stated in the "
+    "description, and is the shape of each movement named?\n"
+    "Fix what can be fixed and remove the rest. A shorter list of events that "
+    "are all real and correctly attributed is worth more than a longer list "
+    "with one that is not."
 )
 
 #: Plain-English actions the annotator must look for and name when it sees
@@ -177,13 +247,20 @@ def action_guidance(vocabulary: Sequence[str] | None = ACTION_VOCABULARY) -> str
         "see: "
         + "; ".join(vocabulary)
         + ".\n"
-        "Return one event per subject per action. A person who gets out of a car, "
-        "closes its door and then talks to someone is three events, not one. "
-        "Ordinary walking or driving is also an event, but never let it stand in "
-        "for a more specific action that is visible in the same window.\n"
-        "Each event carries an actions list holding the checklist phrases it "
-        "shows, copied exactly, and the description must state each of those "
-        "actions in words. Do not list an action you cannot see."
+        "Return one event per subject per continuous scene, not one per action. "
+        "The event's actions list holds every checklist phrase that subject shows "
+        "in the window, in order, copied exactly, and the description tells them "
+        "as one account: a person who enters through the doors, walks to the "
+        "counter and pays is ONE event with three actions, never three events "
+        "that each retell the same walk. Start a new event only when the subjects "
+        "change (a different person or vehicle, or someone joining or leaving the "
+        "interaction) or when the subject's activity clearly ends and a separate "
+        "one begins later in the window.\n"
+        "Ordinary walking or driving is an event on its own only when nothing "
+        "more specific is visible for that subject; never let it stand in for a "
+        "more specific action, and never repeat the same subject's movement as a "
+        "second event. The description must state each listed action in words. "
+        "Do not list an action you cannot see."
     )
 
 
@@ -459,6 +536,7 @@ class LVLMEventAnnotator:
             f"{DESCRIPTION_GUIDANCE}\n\n"
             f"{action_guidance(_vocabulary_of(self))}\n\n"
             f"{PHYSICAL_DETAILS_GUIDANCE}\n\n"
+            f"{REVIEW_GUIDANCE}\n\n"
             'Return JSON only: {"events": [{"event_name": str, "description": str, '
             '"actions": [str], "involved_objects": [{"id": str, "label": str, '
             '"physical_details": str}]}]}.\n\n'
@@ -600,7 +678,8 @@ class LocalQwenEventAnnotator:
             "observable activity that occurs within this window only. Ignore static "
             "background objects and do not infer events outside the displayed time. "
             "For each event, give a concise event name and description, then list "
-            "only the objects involved. The overlays show detector boundaries "
+            "only the objects involved, each by the id of the overlay box around that "
+            "subject. The overlays show detector boundaries "
             "labelled as `class #track_id`. Use the video and the spatial features "
             "as supporting evidence; do not treat detector labels as certain "
             f"visual facts. {_crop_note(prepared_input)}\n\n"
@@ -609,6 +688,7 @@ class LocalQwenEventAnnotator:
             "Each involved object carries its detector track id in the id field and "
             "its label. "
             f"{PHYSICAL_DETAILS_GUIDANCE}\n\n"
+            f"{REVIEW_GUIDANCE}\n\n"
             'Return JSON only as a list of events: [{"event_name": str, '
             '"description": str, "actions": [str], "involved_objects": [{"id": str, '
             '"label": str, "physical_details": str}]}].\n\n'
@@ -1111,6 +1191,35 @@ def _strip_track_ids(text: str) -> str:
     return re.sub(r"\s+([,.;:])", r"\1", cleaned).strip()
 
 
+_OBJECT_ID_SUFFIX = re.compile(r"(\d+)\s*$")
+
+
+def _normalise_object_id(value: Any) -> Any:
+    """Reduce an involved object's id to the bare track id the overlay carries.
+
+    The prompt asks for the id alone, but a model that reads ``person #20``
+    off the overlay sometimes returns exactly that. Downstream joins compare
+    ids as strings against the tracker's ``"20"``, so the prefix would make a
+    correctly identified object untraceable. Anything without a trailing
+    number is returned as given.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    match = _OBJECT_ID_SUFFIX.search(text)
+    return match.group(1) if match else text
+
+
+def _clean_involved_object(entry: dict[str, Any]) -> dict[str, Any]:
+    """Bare track id, prose free of ids; keys the model did not send stay absent."""
+    cleaned = dict(entry)
+    if "id" in cleaned:
+        cleaned["id"] = _normalise_object_id(cleaned["id"])
+    if isinstance(cleaned.get("physical_details"), str):
+        cleaned["physical_details"] = _strip_track_ids(cleaned["physical_details"])
+    return cleaned
+
+
 def _vocabulary_of(annotator: Any) -> tuple[str, ...] | None:
     """The annotator's checklist; the default one when the object does not carry it."""
     if annotator is None or not hasattr(annotator, "action_vocabulary"):
@@ -1229,12 +1338,7 @@ def _clean_events(
         objects = item.get("involved_objects")
         if isinstance(objects, list):
             item["involved_objects"] = [
-                {
-                    **entry,
-                    "physical_details": _strip_track_ids(entry["physical_details"]),
-                }
-                if isinstance(entry, dict) and isinstance(entry.get("physical_details"), str)
-                else entry
+                _clean_involved_object(entry) if isinstance(entry, dict) else entry
                 for entry in objects
             ]
         cleaned.append(item)

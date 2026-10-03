@@ -633,7 +633,7 @@ def test_both_prompts_carry_the_action_checklist() -> None:
     for prompt in (hosted, local):
         assert ACTION_GUIDANCE in prompt
         assert '"actions": [str]' in prompt
-        assert "one event per subject per action" in prompt.lower()
+        assert "one event per subject per continuous scene" in prompt.lower()
         assert "cropped" not in prompt          # this window shows the whole frame
     # the classes a MEVA comparison most often misses are on the checklist
     for action in ("opens a vehicle door", "talks to another person", "vehicle reverses",
@@ -832,3 +832,99 @@ def test_action_vocabulary_is_a_parameter() -> None:
     assert cleaned[0]["other_actions"] == ["opens a vehicle door"]
     # objects without the attribute (older callers, tests) keep the default checklist
     assert ACTION_GUIDANCE in LocalQwenEventAnnotator._build_window_prompt(None, window, 4)
+
+
+def test_involved_object_ids_are_reduced_to_the_bare_track_id() -> None:
+    from videometa.window_annotation import _clean_events, _normalise_object_id
+
+    # the overlay reads "person #20"; a model that copies it must still join to track "20"
+    assert _normalise_object_id("person #20") == "20"
+    assert _normalise_object_id("#20") == "20"
+    assert _normalise_object_id(20) == "20"
+    assert _normalise_object_id("20") == "20"
+    assert _normalise_object_id(None) is None
+    # nothing numeric to extract: left alone rather than guessed
+    assert _normalise_object_id("the walker") == "the walker"
+
+    cleaned = _clean_events([
+        {
+            "event_name": "Person walks toward the counter",
+            "description": "A person in a dark jacket walks toward the counter.",
+            "involved_objects": [
+                {"id": "person #20", "label": "person", "physical_details": "dark jacket"},
+                {"id": 33, "label": "person"},
+            ],
+        }
+    ])
+    assert [obj["id"] for obj in cleaned[0]["involved_objects"]] == ["20", "33"]
+    assert "physical_details" not in cleaned[0]["involved_objects"][1]
+
+
+def test_prompt_keeps_each_event_on_its_own_subjects() -> None:
+    from videometa.window_annotation import DESCRIPTION_GUIDANCE
+
+    # the description may not wander to bystanders or background objects...
+    assert "One event, one set of subjects" in DESCRIPTION_GUIDANCE
+    assert "never described or given actions of its own" in DESCRIPTION_GUIDANCE
+    # ...and the ids must belong to the subjects the description is about
+    assert "must point at the same subjects" in DESCRIPTION_GUIDANCE
+    assert "not the box around the person already standing at the counter" in DESCRIPTION_GUIDANCE
+
+
+def test_checklist_asks_for_one_event_per_scene_with_all_its_actions() -> None:
+    from videometa.window_annotation import DESCRIPTION_GUIDANCE, action_guidance
+
+    guidance = action_guidance()
+    # a subject's consecutive actions are one event carrying several actions...
+    assert "one event per subject per continuous scene, not one per action" in guidance
+    assert "ONE event with three actions" in guidance
+    assert "never repeat the same subject's movement as a second event" in guidance
+    # ...and the old per-action splitting rule is gone
+    assert "three events, not one" not in guidance
+    # involved objects cover every person and object that is part of the action
+    assert "check the overlay boxes one by one" in DESCRIPTION_GUIDANCE
+    assert "people and objects alike" in DESCRIPTION_GUIDANCE
+    assert "never given an invented id" in DESCRIPTION_GUIDANCE
+
+
+def test_prompt_demands_the_shape_of_every_movement() -> None:
+    from videometa.window_annotation import DESCRIPTION_GUIDANCE
+
+    assert "Movement rule" in DESCRIPTION_GUIDANCE
+    for phrase in (
+        "keeps straight on",
+        "turns left",
+        "turns right",
+        "makes a U-turn",
+        "reverses",
+        "goes round in a circle or loop",
+        "walks back and forth",
+        "pulls into or out of a parking bay",
+    ):
+        assert phrase in DESCRIPTION_GUIDANCE, phrase
+    # left and right are the subject's, not the camera's
+    assert "from the subject's own direction of travel" in DESCRIPTION_GUIDANCE
+    assert "not from the camera's point of view" in DESCRIPTION_GUIDANCE
+
+
+def test_both_prompts_make_the_model_review_its_own_events() -> None:
+    from types import SimpleNamespace
+
+    from videometa.window_annotation import (
+        REVIEW_GUIDANCE,
+        LVLMEventAnnotator,
+        LocalQwenEventAnnotator,
+    )
+
+    window = prepared_window()
+    remote = LVLMEventAnnotator._build_prompt(SimpleNamespace(feature_frames=4, action_vocabulary=None), window)
+    local = LocalQwenEventAnnotator._build_window_prompt(SimpleNamespace(action_vocabulary=None), window, 4)
+    for prompt in (remote, local):
+        assert "review your draft critically, one event at a time" in prompt
+        assert "thinking it through step by step" in prompt
+        assert "Did it actually happen?" in prompt
+        assert "Is it worth recording?" in prompt
+        assert "Does it make sense?" in prompt
+        # the review happens before the JSON instruction, and the answer is still JSON only
+        assert prompt.index(REVIEW_GUIDANCE) < prompt.index("Return JSON only")
+        assert "the output stays JSON only" in prompt
