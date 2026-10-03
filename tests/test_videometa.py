@@ -928,3 +928,26 @@ def test_both_prompts_make_the_model_review_its_own_events() -> None:
         # the review happens before the JSON instruction, and the answer is still JSON only
         assert prompt.index(REVIEW_GUIDANCE) < prompt.index("Return JSON only")
         assert "the output stays JSON only" in prompt
+
+
+def test_prompt_asks_for_apparent_gender_and_forbids_same_subject_duplicates() -> None:
+    from videometa.window_annotation import DESCRIPTION_GUIDANCE, PHYSICAL_DETAILS_GUIDANCE, REVIEW_GUIDANCE
+
+    assert "apparent gender and age group" in DESCRIPTION_GUIDANCE
+    assert "say 'a person' only when it cannot be judged" in DESCRIPTION_GUIDANCE
+    assert "apparent gender and age group" in PHYSICAL_DETAILS_GUIDANCE
+    assert "Each event is a different scene" in DESCRIPTION_GUIDANCE
+    assert "never three 'walks toward' events" in DESCRIPTION_GUIDANCE
+    # the same subject may still have several events when the scenes are separate
+    assert "only when the scenes are genuinely separate" in DESCRIPTION_GUIDANCE
+    assert "point at the same scene" in REVIEW_GUIDANCE
+
+
+def test_prompt_groups_subjects_into_an_event_only_when_they_interact() -> None:
+    from videometa.window_annotation import DESCRIPTION_GUIDANCE, REVIEW_GUIDANCE
+
+    assert "Group by interaction" in DESCRIPTION_GUIDANCE
+    assert "Being in the same frame at the same time is not an interaction" in DESCRIPTION_GUIDANCE
+    assert "two people walking separately through the room are two events" in DESCRIPTION_GUIDANCE
+    assert "If a subject acts on its own, it gets its own event with only itself listed" in DESCRIPTION_GUIDANCE
+    assert "every listed subject interacts with the others" in REVIEW_GUIDANCE
