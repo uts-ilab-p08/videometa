@@ -1,24 +1,116 @@
-# videometa
+<h1 align="center">VideoMeta</h1>
 
-`videometa` turns a video into structured annotations in three independent stages:
+<p align="center">
+  <strong>Turn raw surveillance video into structured, reviewable event annotations.</strong>
+</p>
 
-1. Cut the video into overlapping chunks and let a vision-language model score how much happens in each.
-2. Track objects and extract their spatial boundaries in the chunks that score high enough.
-3. Use a pluggable vision-language backend to identify events, descriptions, and involved objects.
+<p align="center">
+  <a href="https://test.pypi.org/project/videometa/"><img alt="Test PyPI" src="https://img.shields.io/pypi/v/videometa?pypiBaseUrl=https%3A%2F%2Ftest.pypi.org&label=test%20pypi&color=4c8bf5"></a>
+  <a href="https://www.python.org/downloads/"><img alt="Python 3.14+" src="https://img.shields.io/badge/python-3.14%2B-3776ab?logo=python&logoColor=white"></a>
+  <a href="https://github.com/uts-ilab-p08/videometa/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-2ea44f"></a>
+  <a href="https://github.com/uts-ilab-p08/videometa"><img alt="Source on GitHub" src="https://img.shields.io/badge/source-GitHub-181717?logo=github"></a>
+</p>
 
-The package does not import OpenCV, Ultralytics, or a VLM at import time. Install and
-configure only the integrations used by your application.
+<p align="center">
+  <img alt="VideoMeta annotation pipeline: a VLM window-significance filter selects clips, a YOLO spatial feature model tracks objects, and a VLM annotator writes event annotations with element coordinates" src="https://raw.githubusercontent.com/uts-ilab-p08/videometa/main/docs/_static/annotation_pipeline.png" width="100%">
+</p>
+
+<!-- docs-body-start -->
+
+VideoMeta takes a long, mostly uneventful video and produces a JSON document of
+*what happened, when, where in the frame, and who or what was involved*. It does
+so in three independent stages, shown left to right above:
+
+| Stage | Component | Model | What it does |
+|---|---|---|---|
+| 1 | **Window significance filter** | Qwen3-VL (local, 4-bit) | Cuts the video into overlapping chunks and scores how much happens in each. Only chunks above a threshold go on. |
+| 2 | **Spatial feature model** | YOLO26 + ByteTrack | Tracks people and vehicles through the selected windows and extracts their bounding boxes, with one identity per object across the whole video. |
+| 3 | **VLM annotator** | Qwen3-VL or any hosted VLM | Reads the window clip together with the tracked-object context and writes plain-English events, descriptions and the objects involved. |
+
+The output pairs each **event annotation** with the **element coordinates** of
+the objects that took part, so a reviewer can jump from a sentence to the exact
+region of the frame it describes.
+
+VideoMeta does not import OpenCV, Ultralytics or a VLM at import time. Install
+only the integrations your application uses.
+
+---
+
+## Contents
+
+- [Installation](#installation)
+- [Quickstart](#quickstart)
+- [Stage 1: find relevant windows](#stage-1-find-relevant-windows)
+- [Stage 2: extract spatial object boundaries](#stage-2-extract-spatial-object-boundaries)
+- [Stage 3: annotate events with a VLM](#stage-3-annotate-events-with-a-vlm)
+- [Output](#output)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
 
 ## Installation
 
 ```bash
-pip install videometa opencv-python ultralytics
-pip install mlx-vlm          # Apple silicon, for the local Qwen3-VL gate and annotator
+pip install videometa
 ```
 
-## Usage
+Add the extras you need:
 
-### Find relevant windows
+| Extra | Installs | Needed for |
+|---|---|---|
+| `vision` | `numpy`, `opencv-python`, `ultralytics` | Video decoding, the window filter clips, and YOLO tracking (stage 2) |
+| `local` | `mlx-vlm` | The local Qwen3-VL gate and annotator on Apple silicon (stages 1 and 3) |
+| `lvlm` | `openai` | Any OpenAI-compatible hosted VLM as the annotator (stage 3) |
+
+```bash
+pip install "videometa[vision,local]"   # Apple silicon, fully local pipeline
+pip install "videometa[vision,lvlm]"    # YOLO locally, hosted VLM for annotation
+```
+
+To try the latest development build from Test PyPI:
+
+```bash
+pip install --index-url https://test.pypi.org/simple/ \
+            --extra-index-url https://pypi.org/simple/ videometa
+```
+
+## Quickstart
+
+The three stages compose into one call through `VideoAnnotator`.
+
+```python
+from videometa import (
+    ActivityGateConfig,
+    ActivityWindowFinder,
+    DetectionConfig,
+    EventExtractor,
+    LocalQwenActivityScorer,
+    ObjectBoundaryExtractor,
+    VideoAnnotator,
+)
+
+# Stage 1: VLM window-significance filter
+scorer = LocalQwenActivityScorer("mlx-community/Qwen3-VL-8B-Instruct-4bit")
+finder = ActivityWindowFinder(scorer, ActivityGateConfig(), clip_directory="clips")
+
+# Stage 2: YOLO spatial feature model
+extractor = ObjectBoundaryExtractor(DetectionConfig(model_path="yolo26l.pt"))
+
+# Stage 3: any backend that returns event records (see below)
+events = EventExtractor(MyEventBackend())
+
+annotator = VideoAnnotator(finder, boundary_extractor=extractor, event_extractor=events)
+annotations = annotator.annotate("camera.mp4", include_events=True)
+document = annotations.to_dict()  # JSON-serializable
+```
+
+Each stage class also works on its own, which makes it easy to run parameter
+experiments, swap in a different detector, or try another event model.
+
+---
+
+## Stage 1: find relevant windows
 
 ```python
 from videometa import ActivityGateConfig, ActivityWindowFinder, LocalQwenActivityScorer
@@ -93,14 +185,16 @@ to compare cuts without running the model again.
 `LocalQwenActivityScorer.from_annotator(annotator)` shares weights with a
 `LocalQwenEventAnnotator` in the same process instead of loading them twice.
 
-### Extract spatial object boundaries
+---
+
+## Stage 2: extract spatial object boundaries
 
 ```python
 from videometa import DetectionConfig, ObjectBoundaryExtractor
 
 extractor = ObjectBoundaryExtractor(
     DetectionConfig(
-        model_path="yolo26n.pt",
+        model_path="yolo26l.pt",
         tracker="bytetrack.yaml",
         confidence_threshold=0.25,
         classes=[0, 1, 2, 3, 5, 7],  # omit or pass [] to track every YOLO class
@@ -116,10 +210,10 @@ Each `ObjectDetection` has pixel coordinates, normalized coordinates via
 `detection.boundary.normalized(video.width, video.height)`, and a spatial description
 such as `"top-left"`.
 
-#### Identity across the video
+### Identity across the video
 
 The tracker runs once over the whole video, not once per window, so an object keeps
-one `track_id` for as long as it stays visible — including across window boundaries.
+one `track_id` for as long as it stays visible, including across window boundaries.
 What it cannot do by itself is survive a disappearance: ByteTrack matches on position,
 so once an object has been out of shot longer than the tracker's buffer its track is
 retired, and the same person walking back in returns under a new id.
@@ -151,19 +245,49 @@ dark coats, and strong lighting changes will stop it merging one person with
 themselves. Raise `stitch_min_similarity` to merge less, or set `stitch_tracks=False`
 to keep the raw tracker ids. The count of merges is logged at INFO.
 
-### Add events with your VLM
+---
 
-Provide a small adapter around the VLM or API of your choice. It receives the source
-video, window time range, and tracked-object context; it returns JSON-compatible event
-records.
+## Stage 3: annotate events with a VLM
 
-#### How descriptions are worded
+The annotator receives the window clip, its time range and the tracked-object
+context from stage 2, and returns JSON-compatible event records. Two annotators
+ship with the package, and a small adapter lets you plug in anything else.
+
+| Annotator | Runs | Install extra |
+|---|---|---|
+| `LocalQwenEventAnnotator` | Qwen3-VL through MLX on Apple silicon | `local` |
+| `LVLMEventAnnotator` | Any OpenAI-compatible vision endpoint | `lvlm` |
+| Your own `EventBackend` | Anything with an `analyze(...)` method | none |
+
+### Bring your own backend
+
+```python
+from videometa import EventExtractor, VideoAnnotator
+
+class MyEventBackend:
+    def analyze(self, video_path, start_seconds, end_seconds, object_context):
+        # Send the selected clip and object_context to your model.
+        return [{
+            "event_name": "Vehicle enters",
+            "description": "A white sedan enters from the left.",
+            "involved_objects": [{
+                "id": "7",
+                "label": "car",
+                "physical_details": "white sedan",
+            }],
+        }]
+
+annotator = VideoAnnotator(finder, event_extractor=EventExtractor(MyEventBackend()))
+annotations = annotator.annotate("camera.mp4", include_events=True)
+```
+
+### How descriptions are worded
 
 `LVLMEventAnnotator` and `LocalQwenEventAnnotator` share one instruction block,
 `DESCRIPTION_GUIDANCE`, which decides how events read. It exists because of what
 the model is handed: spatial features arrive as frame-grid cells (`top-left`,
 `middle-center`), and a model given that vocabulary writes *"car #201 moves from
-top-left to middle-left"* — a description of the picture rather than of the
+top-left to middle-left"*, a description of the picture rather than of the
 scene. The block tells the model to
 
 - write `event_name` as a plain-English phrase in sentence case (`Person loads a
@@ -174,8 +298,8 @@ scene. The block tells the model to
   is left afterwards;
 - name things by appearance (`the white SUV`, `a person in a dark jacket`), never
   by track id;
-- locate action against what is in the scene — a parking bay, the kerb, a
-  doorway — and treat the grid cells as a hint for where to look, not as words
+- locate action against what is in the scene, such as a parking bay, the kerb or a
+  doorway, and treat the grid cells as a hint for where to look, not as words
   to repeat;
 - give direction of travel by destination or landmark, and use compass
   directions only where the scene makes them certain;
@@ -184,13 +308,13 @@ scene. The block tells the model to
 
 Track ids remain available in `involved_objects[].id`. They are also stripped
 from `event_name`, `description` and `physical_details` after the model replies,
-so an id cannot reach a reader even if the model ignores the instruction — ids
+so an id cannot reach a reader even if the model ignores the instruction. Ids
 come from the tracker and change between runs, which makes them meaningless in
 prose.
 
 To change the house style, edit `DESCRIPTION_GUIDANCE`; both annotators follow it.
 
-#### Actions, not just narration
+### Actions, not just narration
 
 Left to itself, a video model answers "describe every activity" with one event
 per window about the most visible movement: *Person walks across the car park*.
@@ -212,55 +336,52 @@ dropped.
 Two related guards: descriptions are asked for in two to four sentences and
 `physical_details` in one phrase, so the output budget goes to more events
 rather than longer ones, and a reply cut off by the token limit is salvaged
-(`_parse_event_list` keeps every complete event before the cut) instead of
-costing the whole window.
+(every complete event before the cut is kept) instead of costing the whole window.
 
-#### Crop the video to the action
+### Crop the video to the action
 
 `WindowSpatialFeatureJoiner(crop_to_activity=True)` writes the annotated MP4
 from the region around the window's actors, the people plus every vehicle that
 moves (a parked car is scenery), padded by `crop_padding` (20%), instead of
-shrinking the whole frame. On a 1080p camera
-resized to 640x360 a 200 px person becomes 70 px and a door or phone is no
-longer readable; the crop keeps them near full size for the same number of
-video tokens. When the region would exceed `crop_max_area` (60%) of the frame
-the full frame is used. The crop is recorded in `PreparedWindowInput.crop_box`
-and both prompts tell the model that the grid cells still refer to the full
-frame.
+shrinking the whole frame. On a 1080p camera resized to 640x360 a 200 px person
+becomes 70 px and a door or phone is no longer readable; the crop keeps them
+near full size for the same number of video tokens. When the region would
+exceed `crop_max_area` (60%) of the frame the full frame is used. The crop is
+recorded in `PreparedWindowInput.crop_box` and both prompts tell the model that
+the grid cells still refer to the full frame.
 
-```python
-from videometa import EventExtractor, VideoAnnotator
+---
 
-class MyEventBackend:
-    def analyze(self, video_path, start_seconds, end_seconds, object_context):
-        # Send the selected clip and object_context to your model.
-        return [{
-            "event_name": "Vehicle enters",
-            "description": "A white sedan enters from the left.",
-            "involved_objects": [{
-                "id": "7",
-                "label": "car",
-                "physical_details": "white sedan",
-            }],
-        }]
+## Output
 
-annotator = VideoAnnotator(finder, event_extractor=EventExtractor(MyEventBackend()))
-annotations = annotator.annotate("camera.mp4", include_events=True)
-document = annotations.to_dict()  # JSON-serializable
-```
+`annotations.to_dict()` returns one JSON-serializable document with four keys:
 
-`VideoAnnotator` is the one-call façade. The three stage classes can also be used
-separately, which supports parameter experiments, alternative object detectors, and
-different event models.
+- **`video`**: path, fps, frame count and resolution;
+- **`windows`**: every chunk with its activity `score`, `subjects`, `event_count`,
+  `summary` and whether it was selected (`is_relevant`);
+- **`object_annotations`**: per selected window, each tracked identity
+  (`track_id`, voted `label`, first and last frame, spatial trajectory) and the
+  per-frame bounding boxes with their pixel coordinates and grid position;
+- **`events`**: the VLM's event records, each with a `name`, a `description` and
+  the `involved_objects` whose ids map back to the tracked identities above.
+
+---
 
 ## Contributing
 
-Interested in contributing? Check out the contributing guidelines. Please note that this project is released with a Code of Conduct. By contributing to this project, you agree to abide by its terms.
+Interested in contributing? Check out the
+[contributing guidelines](https://github.com/uts-ilab-p08/videometa/blob/main/CONTRIBUTING.md).
+Please note that this project is released with a
+[Code of Conduct](https://github.com/uts-ilab-p08/videometa/blob/main/CONDUCT.md).
+By contributing to this project, you agree to abide by its terms.
 
 ## License
 
-`videometa` was created by Juan Vargas. It is licensed under the terms of the MIT license.
+VideoMeta is licensed under the terms of the
+[MIT license](https://github.com/uts-ilab-p08/videometa/blob/main/LICENSE).
 
 ## Credits
 
-`videometa` was created with [`cookiecutter`](https://cookiecutter.readthedocs.io/en/latest/) and the `py-pkgs-cookiecutter` [template](https://github.com/py-pkgs/py-pkgs-cookiecutter).
+VideoMeta was built by the UTS iLab P08 team. It was scaffolded with
+[`cookiecutter`](https://cookiecutter.readthedocs.io/en/latest/) and the
+`py-pkgs-cookiecutter` [template](https://github.com/py-pkgs/py-pkgs-cookiecutter).

@@ -2,6 +2,16 @@
 
 <!--next-version-placeholder-->
 
+## Unreleased
+
+- Documentation: the README and Sphinx docs open with a VideoMeta title, badges
+  and the high-level annotation pipeline diagram (`docs/_static/annotation_pipeline.png`),
+  a stage-by-stage overview table, install extras table and output description.
+  Package metadata gains keywords, classifiers and project URLs so the Test PyPI
+  page links back to the repository.
+- Read the Docs now installs with pip from `docs/requirements.txt` instead of the
+  removed Poetry setup.
+
 ## v0.0.19 (30/09/2026)
 
 The OpenCV motion gate is replaced by a VLM activity gate. **Breaking**:
