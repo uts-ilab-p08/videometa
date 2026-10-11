@@ -1,7 +1,7 @@
 [project]
 name = "videometa"
 version = "0.0.18"
-description = "A Python package designed to organize and manage metadata associated with video files."
+description = "Turn surveillance video into structured event annotations: a VLM window filter, YOLO tracking, and a VLM annotator."
 readme = "README.md"
 authors = [
     { name = "Juan Vargas Torres", email = "Juan.VargasTorres@student.uts.edu.au" },
@@ -13,6 +13,34 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = []
+license = { file = "LICENSE" }
+keywords = [
+    "video",
+    "annotation",
+    "metadata",
+    "vision-language-model",
+    "yolo",
+    "object-tracking",
+    "qwen",
+    "surveillance",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+
+[project.urls]
+Homepage = "https://github.com/uts-ilab-p08/videometa"
+Repository = "https://github.com/uts-ilab-p08/videometa"
+Changelog = "https://github.com/uts-ilab-p08/videometa/blob/main/CHANGELOG.md"
+Issues = "https://github.com/uts-ilab-p08/videometa/issues"
 
 [project.optional-dependencies]
 # Video decoding, the motion gate, and YOLO object extraction.
