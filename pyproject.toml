@@ -1,6 +1,6 @@
 [project]
 name = "videometa"
-version = "0.0.21"
+version = "0.0.22"
 description = "Turn surveillance video into structured event annotations: a VLM window filter, YOLO tracking, and a VLM annotator."
 readme = "README.md"
 authors = [
