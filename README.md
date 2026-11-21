@@ -461,7 +461,7 @@ By contributing to this project, you agree to abide by its terms.
 | [Gourika Sood](https://github.com/gourika22) | Backend Lead: Postgres event store, FastAPI layer with in-process RAG, test suite |
 | [Nelkit Chavez](https://github.com/Nelkit) | Frontend Lead: web app, API contract, integration and Vercel deployment, showcase poster and demo video |
 
-**Client:** Dr Ali Haidar · **Mentor:** Junaid Akram
+**External Mentor:** Dr Ali Haidar · **Mentor:** Junaid Akram
 
 ## Links
 
