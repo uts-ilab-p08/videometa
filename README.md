@@ -15,6 +15,10 @@
   <img alt="VideoMeta annotation pipeline: a VLM window-significance filter selects clips, a YOLO spatial feature model tracks objects, and a VLM annotator writes event annotations with element coordinates" src="https://raw.githubusercontent.com/uts-ilab-p08/videometa/main/docs/_static/annotation_pipeline.png" width="100%">
 </p>
 
+<p align="center">
+  📌 <a href="https://github.com/uts-ilab-p08/cctv-query-frontend/blob/main/docs/media/poster/poster-dark.png">View the project showcase poster</a>
+</p>
+
 <!-- docs-body-start -->
 
 VideoMeta takes a long, mostly uneventful video and produces a JSON document of
@@ -44,7 +48,12 @@ only the integrations your application uses.
 - [Stage 2: extract spatial object boundaries](#stage-2-extract-spatial-object-boundaries)
 - [Stage 3: annotate events with a VLM](#stage-3-annotate-events-with-a-vlm)
 - [Output](#output)
+- [Results on MEVA](#results-on-meva)
+- [Known limitations](#known-limitations)
+- [Related repositories](#related-repositories)
 - [Contributing](#contributing)
+- [Team](#team)
+- [Links](#links)
 - [License](#license)
 
 ---
@@ -367,6 +376,72 @@ the grid cells still refer to the full frame.
 
 ---
 
+## Results on MEVA
+
+VideoMeta was the annotation layer of **Horus**, the UTS iLab capstone project
+*08-01 Interactive Surveillance Video Querying Using LLMs and Multi-Camera CCTV
+Datasets* (Spring 2026). It was run over 71 development clips of the audited
+[MEVA](https://mevadata.org/) subset (about 5.9 hours from 23 cameras at four
+sites) and scored against MEVA's audited activity records, which the pipeline
+never reads.
+
+| Output | Value |
+|---|---|
+| Structured events | 1,955 |
+| Tracked objects | 1,387 |
+| Spatial-feature records | 590,055 |
+
+| Check | Result | Detail |
+|---|---|---|
+| Coverage (Qwen3-8B judge, ≥ 0.7) | **80.5%** | 487 of 605 MEVA activity types in a clip described by at least one event |
+| Agreement (gpt-oss-120b judge) | **96.4%** | 1,724 of 1,788 events consistent with MEVA; 1% contradict; strict match (≥ 0.75) 19.7% |
+| Timing (temporal IoU) | **0.40** | Mean over 1,788 events; 29% reach IoU ≥ 0.5 |
+| Judge vs. human review | **84%** | Judge matched both reviewers on 27 of 32 items where they agreed (100 sampled events) |
+
+Entering and exiting through doors, object transfers and standing up were
+almost always described; conversations, phone calls, embraces and vehicle
+turns were the weakest. The runs and evaluation scripts live in
+[video-annotation-pipeline](https://github.com/uts-ilab-p08/video-annotation-pipeline).
+
+---
+
+## Known limitations
+
+- **Different words, same action.** Annotations are usually consistent with
+  MEVA, but only about one in five uses MEVA's own action wording.
+- **Small or subtle actions.** Short, low-motion or distant actions (phone
+  calls, embraces, vehicle turns) are often described as plain movement.
+- **Fixed windows.** Windows do not follow the action, so some events fall just
+  outside the span they describe, which lowers temporal IoU.
+- **Colour-based re-identification.** Track stitching relies on colour
+  signatures rather than a learned re-ID model, so similar-looking people can be
+  merged and strong lighting changes can split one person into two.
+- **One camera at a time.** Each video is processed independently; nothing links
+  tracks or events across cameras that see the same scene.
+
+---
+
+## Related repositories
+
+VideoMeta is one of the repositories of the Horus system in the
+[uts-ilab-p08](https://github.com/uts-ilab-p08) organisation:
+
+| Repository | Role |
+|---|---|
+| **[videometa](https://github.com/uts-ilab-p08/videometa)** (this repo) | Annotation library: VLM window filter, YOLO26 + ByteTrack tracking, VLM annotator |
+| [video-annotation-pipeline](https://github.com/uts-ilab-p08/video-annotation-pipeline) | Uses VideoMeta over the MEVA clips: manifests, video windows, annotation, export, upload to Supabase, and the annotation QA and coverage explorer |
+| [iLabs-capstone-rag](https://github.com/uts-ilab-p08/iLabs-capstone-rag) | RAG layer: bge-base embeddings, Qdrant index, rule-based filters, cited answers |
+| [surveillance-backend](https://github.com/uts-ilab-p08/surveillance-backend) | FastAPI service: session check, search and assistant endpoints, saved queries, video tracks, SSE progress |
+| [cctv-query-frontend](https://github.com/uts-ilab-p08/cctv-query-frontend) | Next.js web app: natural-language search, cited answers and video playback with tracked boxes |
+
+Early captioning proofs of concept, kept for reference:
+[blip-captioning-poc](https://github.com/uts-ilab-p08/blip-captioning-poc) (BLIP
+on CCTV frames) and
+[flamingo-captioning-poc](https://github.com/uts-ilab-p08/flamingo-captioning-poc)
+(OpenFlamingo few-shot captioning).
+
+---
+
 ## Contributing
 
 Interested in contributing? Check out the
@@ -374,6 +449,29 @@ Interested in contributing? Check out the
 Please note that this project is released with a
 [Code of Conduct](https://github.com/uts-ilab-p08/videometa/blob/main/CONDUCT.md).
 By contributing to this project, you agree to abide by its terms.
+
+## Team
+
+| Member | Primary contributions |
+|---|---|
+| [Juan Sebastian Vargas](https://github.com/Sebas102507) | Video Annotation Lead: annotation pipeline, Qwen3-VL activity gate, `videometa` library (tracking, crop-to-activity windowing, annotation prompts, shared model loader), coverage check and explorer |
+| [Saurabh Sabharwal](https://github.com/finegoodok) | Evaluation (Annotation QA): LLM-judge QA pipeline and rubric, temporal IoU evaluation, human-in-the-loop review |
+| [Maria Jose Bustamante](https://github.com/mariajosebustamante99) | Evaluation Lead: MEVA reference data, event-to-MEVA matching, data audits, manual assessment form, human review analysis |
+| [Abhishek Chopda](https://github.com/abychopda) | RAG Lead and retrieval/model evaluation: embeddings, Qdrant index, rule-based filters, cited-answer prompt |
+| [Gourika Sood](https://github.com/gourika22) | Backend Lead: Postgres event store, FastAPI layer with in-process RAG, test suite |
+| [Nelkit Chavez](https://github.com/Nelkit) | Frontend Lead: web app, API contract, integration and Vercel deployment, showcase poster and demo video |
+
+**Client:** Dr Ali Haidar · **Mentor:** Junaid Akram
+
+## Links
+
+- Live demo of the full system: [cctvai.site](https://cctvai.site)
+- Live API docs: [surveillance-api.nelkit.dev/docs](https://surveillance-api.nelkit.dev/docs)
+- Video walkthrough (2:48, 4K): [horus-demo-loop-4k-dark.mp4](https://media.nelkit.dev/projects/demos/horus-demo-loop-4k-dark.mp4)
+- Showcase poster: [poster-dark.png](https://github.com/uts-ilab-p08/cctv-query-frontend/blob/main/docs/media/poster/poster-dark.png)
+- Package on Test PyPI: [videometa](https://test.pypi.org/project/videometa/)
+- MEVA dataset: [mevadata.org](https://mevadata.org/)
+- Organisation: [uts-ilab-p08](https://github.com/uts-ilab-p08)
 
 ## License
 
